@@ -1,0 +1,184 @@
+# Default pipeline configuration. Override with --config my.yaml or --set section.key=value.
+# Everything model-dependent or expensive is configurable here; nothing is hard-coded.
+
+project:
+  data_dir: data
+  db_path: null            # default: <data_dir>/state.db
+  log_level: INFO
+  device: auto             # auto | cuda | mps | cpu
+  seed: 1234
+  ffmpeg_path: null        # null -> search PATH, then the imageio-ffmpeg bundled binary
+  ffprobe_path: null
+
+download:
+  provider: yt_dlp
+  max_resolution: 1080
+  format: mp4
+  cookies_file: null       # only for videos you are authorized to access
+  rate_limit: null         # e.g. "4M"
+  retries: 3
+  concurrency: 2
+  skip_existing: true
+  socket_timeout: 30
+  extra_args: {}           # passed straight to yt-dlp options
+
+preprocess:
+  audio_sample_rate: 16000 # 16 kHz mono PCM is what speech models expect
+  audio_channels: 1
+  transcode_if_needed: true
+  decodable_codecs: [h264, hevc, vp9, av1, mpeg4, vp8]
+  max_transcode_height: 1080
+
+scene_detection:
+  detector: content        # content | adaptive | threshold
+  threshold: 27.0          # ContentDetector threshold (HSV delta)
+  adaptive_threshold: 3.0
+  fade_threshold: 12.0     # ThresholdDetector luminance threshold for fades
+  min_scene_len_seconds: 0.6
+  detect_fades: true
+  max_scene_duration: 60.0 # over-long shots are split for analysis; splits are marked, not treated as cuts
+  frame_skip: 0
+  downscale: null          # null = automatic
+
+frame_sampling:
+  min_frames_per_scene: 3
+  max_frames_per_scene: 20
+  motion_aware: true
+  scene_boundary_frames: true
+  boundary_offset_seconds: 0.15
+  analysis_fps: 4.0        # decode rate of the low-resolution scan pass
+  analysis_width: 160
+  change_threshold: 0.12   # normalized visual change that earns an extra frame
+  min_frame_gap_seconds: 0.5
+  jpeg_quality: 90
+  max_frame_side: 1280
+  compute_optical_flow: true
+  extract_clips: true
+  clip_max_duration: 30.0
+  clip_codec: copy         # copy (fast, keyframe aligned) | libx264 (exact cuts)
+
+transcription:
+  enabled: true
+  provider: faster_whisper # faster_whisper | transformers | mock | none
+  model: base              # tiny | base | small | medium | large-v3 (or a HF repo id for transformers)
+  language: auto
+  compute_type: auto       # auto -> float16 on CUDA, int8 on CPU
+  beam_size: 5
+  vad_filter: true
+  word_timestamps: true
+  min_segment_confidence: 0.0
+  initial_prompt: null     # bias the decoder, e.g. a Devanagari sentence to keep Hindi output in Devanagari script
+  device: null
+
+audio_events:
+  enabled: true
+  provider: energy         # energy (heuristic, never guesses sound type) | transformers (AudioSet classifier) | none
+  model: MIT/ast-finetuned-audioset-10-10-0.4593
+  window_seconds: 2.0
+  hop_seconds: 1.0
+  min_score: 0.3
+  top_k: 3
+  energy_threshold_db: -45.0
+
+ocr:
+  enabled: true
+  provider: rapidocr       # rapidocr | easyocr | paddleocr | mock | none
+  languages: [en]
+  min_confidence: 0.5
+  max_frames_per_scene: 6
+  merge_similarity: 0.85
+  merge_max_gap_seconds: 3.0
+  min_text_length: 2
+
+vision:
+  provider: heuristic      # heuristic | hf | anthropic | openai_compatible | mock
+  preset: null             # see config/models.yaml -> presets.vision
+  model: null
+  base_url: null
+  api_key_env: null
+  max_images_per_request: 6
+  image_max_side: 768
+  frame_captions: false
+  frame_captions_per_scene: 3
+  use_video_input: false
+  enrichers: []            # optional grounded enrichers, e.g. [clip]
+  clip_model: openai/clip-vit-base-patch32
+  max_new_tokens: 700
+  temperature: 0.0
+  timeout_seconds: 120
+  retries: 2
+  device: null
+  torch_dtype: auto
+  verify_with_model: true
+
+llm:
+  provider: none           # none | anthropic | openai_compatible | mock  (text-only helper model)
+  model: null
+  base_url: null
+  api_key_env: null
+  max_tokens: 1024
+  temperature: 0.2
+  timeout_seconds: 120
+
+temporal:
+  enabled: true
+  include_speech_events: true
+  include_ocr_events: true
+  include_audio_events: true
+  include_camera_events: true
+  include_transitions: true
+  include_state_changes: true
+  min_camera_consistency: 0.6
+  min_camera_motion: 0.35
+  max_relation_neighbors: 6
+  emit_inverse_relations: true
+  long_range_min_gap_seconds: 20.0
+  causal_inference: none   # none | llm (requires llm.provider)
+  speech_min_words: 3
+
+qa:
+  questions_per_minute: 5
+  min_questions: 8
+  max_questions: 400
+  seed: 1234
+  type_weights:
+    timestamp: 1.0
+    before_after: 1.5
+    temporal_ordering: 1.5
+    duration: 1.0
+    event_localization: 1.0
+    state_change: 1.0
+    multi_event: 1.0
+    long_range: 1.0
+  ordering_min_gap_seconds: 1.0
+  long_range_min_gap_seconds: 20.0
+  allow_unscored_evidence: true
+  paraphrase: false        # LLM paraphrasing of template questions (requires llm.provider)
+  include_speech_in_answers: true
+
+validation:
+  minimum_confidence: 0.75 # >= accepted
+  review_confidence: 0.5   # >= review, below -> rejected
+  verifier: heuristic      # none | heuristic | vlm | composite
+  verify_sample_fraction: 1.0
+  reject_on_missing_files: true
+  grounding_min_overlap: 0.3
+  max_vlm_verifications_per_video: 200
+
+deduplication:
+  enabled: true
+  near_duplicate_threshold: 0.9
+  question_similarity_threshold: 0.92
+  evidence_iou_threshold: 0.5
+  method: minhash          # minhash | tfidf
+  num_perm: 128
+  shingle_size: 3
+
+export:
+  formats: [jsonl, parquet]
+  include_review: true
+  include_rejected: false
+  output_dir: null         # default <data_dir>/final
+  relative_paths: true
+  combined_jsonl: true     # one dataset.jsonl with every record (each line carries record_type) - upload a single file
+  per_type_jsonl: true     # also write frames.jsonl, clips.jsonl, scenes.jsonl, events.jsonl, temporal_qa.jsonl, ...

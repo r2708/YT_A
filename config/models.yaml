@@ -1,0 +1,72 @@
+# Model presets. Select with e.g.  --set vision.preset=smolvlm2_256m  or in your config:
+#   vision: { preset: claude }
+# A preset is merged into its section; explicit keys in the section win.
+presets:
+  vision:
+    heuristic:
+      provider: heuristic
+      model: null
+    smolvlm2_256m:            # tiny local VLM, runs on CPU / MPS / CUDA, supports multi-image and video
+      provider: hf
+      model: HuggingFaceTB/SmolVLM2-256M-Video-Instruct
+      use_video_input: false
+      max_images_per_request: 4
+      image_max_side: 512
+      max_new_tokens: 500
+    smolvlm2_2b:
+      provider: hf
+      model: HuggingFaceTB/SmolVLM2-2.2B-Instruct
+      max_images_per_request: 6
+      image_max_side: 768
+    qwen2_5_vl_3b:
+      provider: hf
+      model: Qwen/Qwen2.5-VL-3B-Instruct
+      max_images_per_request: 8
+      image_max_side: 768
+      use_video_input: true
+    qwen2_5_vl_7b:
+      provider: hf
+      model: Qwen/Qwen2.5-VL-7B-Instruct
+      max_images_per_request: 8
+      image_max_side: 896
+      use_video_input: true
+    claude:                    # Anthropic API (ANTHROPIC_API_KEY)
+      provider: anthropic
+      model: claude-opus-5
+      max_images_per_request: 8
+      image_max_side: 1024
+    vllm_qwen2_5_vl:           # any OpenAI-compatible server (vLLM, Ollama, LM Studio, OpenAI)
+      provider: openai_compatible
+      model: Qwen/Qwen2.5-VL-7B-Instruct
+      base_url: http://localhost:8000/v1
+      api_key_env: OPENAI_API_KEY
+      max_images_per_request: 8
+  transcription:
+    fast_cpu:
+      provider: faster_whisper
+      model: base
+      compute_type: int8
+    accurate:
+      provider: faster_whisper
+      model: large-v3
+    mps:                       # Apple Silicon GPU path via transformers
+      provider: transformers
+      model: openai/whisper-small
+  llm:
+    claude:
+      provider: anthropic
+      model: claude-opus-5
+    local_openai_compatible:
+      provider: openai_compatible
+      model: Qwen/Qwen2.5-7B-Instruct
+      base_url: http://localhost:8000/v1
+      api_key_env: OPENAI_API_KEY
+  ocr:
+    rapidocr:
+      provider: rapidocr
+    easyocr:
+      provider: easyocr
+      languages: [en]
+    paddle:
+      provider: paddleocr
+      languages: [en]

@@ -1,0 +1,10 @@
+# One URL per line. Lines starting with # are ignored.
+# Add your YouTube URLs below (one per line):
+
+# Example formats:
+# https://www.youtube.com/watch?v=VIDEO_ID
+# https://youtu.be/VIDEO_ID
+# VIDEO_ID
+
+# Add your URLs here:
+

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment / secrets
+.env
+*.cookies.txt
+cookies.txt
+
+# Pipeline data (large binaries and generated artifacts)
+data/downloads/*
+data/audio/*
+data/scenes/*
+data/frames/*
+data/clips/*
+data/transcripts/*
+data/ocr/*
+data/annotations/*
+data/qa/*
+data/validated/*
+data/final/*
+data/logs/*
+data/*.db
+data/*.db-wal
+data/*.db-shm
+!data/**/.gitkeep
+
+# Model caches
+models/
+*.onnx
+*.pt
+*.bin
+*.safetensors
+
+# OS
+.DS_Store

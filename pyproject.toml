@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-dataset-pipeline"
+version = "0.1.0"
+description = "YouTube video -> temporally grounded multimodal dataset pipeline for LLM / video-model training"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "WLIQ" }]
+dependencies = [
+  "yt-dlp>=2024.10.0",
+  "opencv-python>=4.8",
+  "numpy>=1.24",
+  "scenedetect>=0.6.4",
+  "pydantic>=2.5",
+  "pydantic-settings>=2.0",
+  "PyYAML>=6.0",
+  "pandas>=2.0",
+  "pyarrow>=14.0",
+  "typer>=0.9",
+  "rich>=13.0",
+  "tqdm>=4.65",
+  "datasketch>=1.6",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+asr = ["faster-whisper>=1.0"]
+ocr = ["rapidocr-onnxruntime>=1.3"]
+ocr-easyocr = ["easyocr>=1.7"]
+vision-local = ["torch>=2.1", "transformers>=4.45", "pillow>=10.0", "accelerate>=0.30"]
+vision-anthropic = ["anthropic>=1.0"]
+vision-openai = ["openai>=1.30"]
+audio-events = ["torch>=2.1", "transformers>=4.45", "torchaudio>=2.1"]
+semantic-dedup = ["scikit-learn>=1.3"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "ruff>=0.4", "mypy>=1.8", "types-PyYAML", "pandas-stubs"]
+all = [
+  "video-dataset-pipeline[asr,ocr,vision-local,vision-anthropic,vision-openai,audio-events,semantic-dedup,dev]",
+]
+
+[project.scripts]
+video-dataset = "video_dataset.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+video_dataset = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]
+markers = [
+  "integration: end-to-end pipeline tests on a synthetic local video",
+  "slow: tests that take more than a few seconds",
+  "network: tests that need network access (skipped by default)",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF"]
+ignore = ["E501", "B008", "RUF012", "SIM108", "B905", "N818", "RUF005", "SIM102", "UP007", "B006", "RUF001", "RUF002", "RUF003", "RUF046", "SIM105", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["video_dataset"]
+mypy_path = "src"
+ignore_missing_imports = true
+warn_unused_ignores = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = false
+disallow_untyped_defs = false

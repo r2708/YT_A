@@ -1,0 +1,20 @@
+# Stage orchestration. Stages run in this order per video and are checkpointed in SQLite.
+pipeline:
+  stages:
+    - DOWNLOAD
+    - PREPROCESS
+    - SCENE_DETECTION
+    - FRAME_EXTRACTION
+    - AUDIO
+    - TRANSCRIPTION
+    - OCR
+    - VISION_ANALYSIS
+    - TEMPORAL_ANALYSIS
+    - QA_GENERATION
+    - VALIDATION
+    - EXPORT
+  stage_retries: 1              # automatic retries of a failed stage within one run
+  continue_on_error: true       # a failing video never stops the batch
+  workers: 1                    # parallel videos for CPU-bound stages (download..OCR)
+  model_stages_sequential: true # model stages run one video at a time so models load once
+  stage_timeout_seconds: null
