@@ -36,6 +36,14 @@ data/*.db-wal
 data/*.db-shm
 !data/**/.gitkeep
 
+# Database files (anywhere in project)
+*.db
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+
 # Model caches
 models/
 *.onnx
