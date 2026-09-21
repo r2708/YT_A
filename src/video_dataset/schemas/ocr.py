@@ -32,6 +32,15 @@ class OCRTrack(BaseSchema):
     num_detections: int
     mean_confidence: float | None = None
     bbox: list[float] = Field(default_factory=list)  # union bbox
+    # Set by classify_tracks(): a watermark / channel handle / logo that is on screen for most of the
+    # video, or a partial read of a longer text seen at the same time. Neither is a temporal event.
+    is_static_overlay: bool = False
+    is_fragment: bool = False
+    overlay_family: str | None = None  # normalized text of the overlay this track belongs to
+
+    @property
+    def is_event_worthy(self) -> bool:
+        return not (self.is_static_overlay or self.is_fragment)
 
 
 class OCRResult(BaseSchema):
@@ -40,3 +49,4 @@ class OCRResult(BaseSchema):
     frames_processed: int
     detections: list[OCRDetection] = Field(default_factory=list)
     tracks: list[OCRTrack] = Field(default_factory=list)
+    static_overlays: list[str] = Field(default_factory=list)  # normalized texts classified as persistent overlays

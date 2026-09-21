@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import time
@@ -33,14 +34,33 @@ class State:
 state = State()
 
 
+def load_env_file(path: str | Path | None = None) -> list[str]:
+    """Export the non-empty entries of `.env` (API keys, HF_TOKEN, HF_HOME ...) that are not already set.
+
+    Blank lines such as `HF_HOME=` from a copied .env.example are skipped on purpose: exporting an empty
+    HF_HOME makes huggingface_hub cache models in ./hub inside the project. Returns the names set."""
+    try:
+        from dotenv import dotenv_values, find_dotenv
+    except Exception as exc:  # pragma: no cover
+        log.debug("python-dotenv unavailable: %s", exc)
+        return []
+    env_path = str(path) if path else find_dotenv(usecwd=True)
+    if not env_path or not Path(env_path).exists():
+        return []
+    applied: list[str] = []
+    for key, value in dotenv_values(env_path).items():
+        if not key or value is None or not str(value).strip():
+            continue
+        if os.environ.get(key):
+            continue  # the real environment wins
+        os.environ[key] = str(value)
+        applied.append(key)
+    return applied
+
+
 def _config() -> PipelineConfig:
     if state.config is None:
-        try:  # .env in the working directory (API keys, HF_TOKEN); existing environment wins
-            from dotenv import load_dotenv
-
-            load_dotenv(override=False)
-        except Exception as exc:  # pragma: no cover
-            log.debug("dotenv not loaded: %s", exc)
+        load_env_file()
         cfg = load_config(state.config_path, state.overrides)
         if state.log_level:
             cfg.project.log_level = state.log_level

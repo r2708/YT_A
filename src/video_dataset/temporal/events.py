@@ -11,6 +11,7 @@ from video_dataset.schemas.scene import Frame, Scene, SceneScan, TransitionType
 from video_dataset.schemas.transcript import AudioAnalysis, AudioEventCategory, Transcript
 from video_dataset.schemas.vision import CameraMovement, SceneAnalysis, Setting, VisionResult
 from video_dataset.utils.ids import event_id as make_event_id
+from video_dataset.utils.logging import get_logger
 from video_dataset.utils.text import content_words, lower_first, sentence
 from video_dataset.utils.timecode import clamp, interval_overlap
 from video_dataset.vision.motion import MOVEMENT_PHRASES, motion_segments
@@ -65,6 +66,9 @@ def transition_confidence(score: float | None, threshold: float | None) -> float
     if score is None or not threshold:
         return None
     return round(clamp(0.5 + 0.5 * (score - threshold) / threshold, 0.5, 1.0), 3)
+
+
+log = get_logger("temporal.events")
 
 
 class EventExtractor:
@@ -280,7 +284,18 @@ class EventExtractor:
 
     def _ocr_events(self, video_id: str, ocr: OCRResult, frames: list[Frame], duration: float) -> list[Event]:
         out: list[Event] = []
-        for tr in ocr.tracks:
+        tracks = ocr.tracks
+        if not self.cfg.include_static_overlay_text:
+            from video_dataset.ocr.merge import classify_tracks
+
+            total_scenes = len({f.scene_id for f in frames})
+            tracks, overlays = classify_tracks(tracks, total_scenes)
+            skipped = [t for t in tracks if not t.is_event_worthy]
+            if skipped:
+                log.info("ocr: %d of %d text tracks are static overlays %s or fragments; not emitted as events", len(skipped), len(tracks), overlays)
+        for tr in tracks:
+            if not tr.is_event_worthy:
+                continue
             end = max(tr.last_seen, tr.first_seen + 0.5)
             out.append(
                 Event(

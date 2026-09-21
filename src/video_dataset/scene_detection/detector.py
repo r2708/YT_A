@@ -95,6 +95,9 @@ class PySceneDetector:
                 )
             )
         scenes = _snap_to_duration(scenes, info.duration, fps)
+        # each detector enforces min_scene_len on its own boundaries; combined they can still yield a
+        # sub-minimum scene (a cut right after a fade), so enforce it once more on the merged list
+        scenes = enforce_min_scene_length(scenes, cfg.min_scene_len_seconds)
         scenes = split_long_scenes(scenes, cfg.max_scene_duration, fps, video_id)
         return SceneDetectionResult(video_id=video_id, detector=self.name, threshold=cfg.threshold, duration=info.duration, scenes=scenes)
 
@@ -151,6 +154,33 @@ def _snap_to_duration(scenes: list[Scene], duration: float, fps: float) -> list[
     out[0] = out[0].model_copy(update={"start_time": 0.0, "start_frame": 0})
     if duration and out[-1].end_time < duration - (1.0 / fps if fps else 0.05):
         out[-1] = out[-1].model_copy(update={"end_time": round(duration, 3), "end_frame": int(round(duration * fps))})
+    return out
+
+
+def enforce_min_scene_length(scenes: list[Scene], min_seconds: float) -> list[Scene]:
+    """Merge scenes shorter than `min_seconds` into their predecessor (the first one into its
+    successor) and renumber. The merged scene keeps the earlier scene's transition_in."""
+    if not min_seconds or min_seconds <= 0 or len(scenes) < 2:
+        return scenes
+    merged: list[Scene] = []
+    for sc in scenes:
+        if merged and (sc.end_time - sc.start_time) < min_seconds:
+            prev = merged[-1]
+            merged[-1] = prev.model_copy(update={"end_time": sc.end_time, "end_frame": sc.end_frame})
+            continue
+        if not merged and (sc.end_time - sc.start_time) < min_seconds:
+            merged.append(sc)  # first scene: extend it with the next one below
+            continue
+        if merged and (merged[-1].end_time - merged[-1].start_time) < min_seconds:
+            first = merged[-1]
+            merged[-1] = sc.model_copy(update={"start_time": first.start_time, "start_frame": first.start_frame, "transition_in": first.transition_in})
+            continue
+        merged.append(sc)
+    if len(merged) == len(scenes):
+        return scenes
+    out = []
+    for idx, sc in enumerate(merged):
+        out.append(sc.model_copy(update={"scene_id": make_scene_id(idx), "index": idx}))
     return out
 
 

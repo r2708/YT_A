@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from video_dataset.ocr.base import create_ocr_engine
-from video_dataset.ocr.merge import merge_detections
+from video_dataset.ocr.merge import classify_tracks, merge_detections
 from video_dataset.pipeline.context import StageOutput, VideoContext
 from video_dataset.schemas.ocr import OCRDetection, OCRResult
 from video_dataset.schemas.scene import Frame, FrameSamplingResult
@@ -74,11 +74,15 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
                 )
             )
     tracks = merge_detections(detections, cfg.merge_similarity, cfg.merge_max_gap_seconds)
-    result = OCRResult(video_id=ctx.video_id, engine=engine.name, frames_processed=len(targets), detections=detections, tracks=tracks)
+    total_scenes = len({f.scene_id for f in frames})
+    tracks, overlays = classify_tracks(tracks, total_scenes, cfg.static_overlay_min_scene_fraction, cfg.static_overlay_min_scenes, cfg.merge_max_gap_seconds)
+    n_overlay = sum(1 for t in tracks if t.is_static_overlay)
+    n_fragment = sum(1 for t in tracks if t.is_fragment)
+    result = OCRResult(video_id=ctx.video_id, engine=engine.name, frames_processed=len(targets), detections=detections, tracks=tracks, static_overlays=overlays)
     write_json_atomic(out, result)
-    log.info("%d detections -> %d text tracks over %d frames (%d failures)", len(detections), len(tracks), len(targets), failures)
+    log.info("%d detections -> %d text tracks over %d frames (%d failures); %d overlay tracks %s, %d fragments", len(detections), len(tracks), len(targets), failures, n_overlay, overlays, n_fragment)
     return StageOutput(
         artifact_path=str(out),
-        metrics={"frames": len(targets), "detections": len(detections), "tracks": len(tracks), "failures": failures, "engine": engine.name},
-        message=f"{len(detections)} text detections ({len(tracks)} unique)",
+        metrics={"frames": len(targets), "detections": len(detections), "tracks": len(tracks), "static_overlay_tracks": n_overlay, "fragment_tracks": n_fragment, "static_overlays": overlays, "failures": failures, "engine": engine.name},
+        message=f"{len(detections)} text detections ({len(tracks) - n_overlay - n_fragment} usable, {n_overlay} overlay, {n_fragment} fragments)",
     )

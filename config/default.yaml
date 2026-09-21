@@ -62,7 +62,9 @@ frame_sampling:
   compute_optical_flow: true
   extract_clips: true
   clip_max_duration: 30.0
-  clip_codec: copy         # copy (fast, keyframe aligned) | libx264 (exact cuts)
+  clip_codec: auto         # auto (stream-copy, re-encode clips that miss the boundary) | libx264 (always exact) | copy (keyframe aligned only)
+  clip_tolerance_seconds: 0.25  # a clip whose real length differs from the scene by more than this is re-cut (auto) or flagged (copy)
+  clip_max_height: 720     # re-encoded clips are downscaled to this height
 
 transcription:
   enabled: true
@@ -95,7 +97,9 @@ ocr:
   max_frames_per_scene: 6
   merge_similarity: 0.85
   merge_max_gap_seconds: 3.0
-  min_text_length: 2
+  min_text_length: 3       # drop 1-2 character reads (noise)
+  static_overlay_min_scene_fraction: 0.3  # text seen in >= 30% of scenes = watermark/handle/logo, not an event
+  static_overlay_min_scenes: 4
 
 vision:
   provider: heuristic      # heuristic | hf | anthropic | openai_compatible | mock
@@ -133,6 +137,7 @@ temporal:
   enabled: true
   include_speech_events: true
   include_ocr_events: true
+  include_static_overlay_text: false  # true: watermark / partial-read OCR tracks also become events
   include_audio_events: true
   include_camera_events: true
   include_transitions: true

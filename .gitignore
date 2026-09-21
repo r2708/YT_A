@@ -44,8 +44,9 @@ data/*.db-shm
 # Logs
 *.log
 
-# Model caches
+# Model caches (hub/ appears if HF_HOME is ever exported empty)
 models/
+hub/
 *.onnx
 *.pt
 *.bin

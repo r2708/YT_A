@@ -80,6 +80,9 @@ class Clip(TimeSpan):
     scene_id: str
     clip_path: str
     frame_ids: list[str] = Field(default_factory=list)
+    media_duration: float | None = None  # measured length of the file (stream copy cuts at keyframes)
+    exact: bool = True  # media_duration matches end_time - start_time within clip_tolerance_seconds
+    codec: str | None = None  # "copy" | "libx264": how this file was produced
 
 
 class SceneDetectionResult(BaseSchema):

@@ -592,7 +592,11 @@ lexically against their evidence (`grounding_min_overlap`); records with `null` 
   model loads once per process (`pipeline.model_stages_sequential`).
 * `frame_sampling.analysis_fps`, `analysis_width`, `max_frames_per_scene`, `vision.max_images_per_request`
   and `vision.image_max_side` are the main cost levers. `ocr.max_frames_per_scene` bounds OCR time.
-* `frame_sampling.clip_codec: copy` cuts clips instantly at keyframes; `libx264` gives exact boundaries.
+* `frame_sampling.clip_codec: auto` (default) stream-copies each clip, measures the file and re-encodes
+  only the clips whose length is off by more than `clip_tolerance_seconds` (stream copy can only start at
+  a keyframe, so on sparse-keyframe sources such as AV1 a 1.5 s scene can come out as 6 s of footage).
+  `libx264` always re-encodes; `copy` never does but flags such clips `exact: false` in `clips.jsonl`.
+  Every clip record carries `media_duration`, `exact` and `codec`.
 * `vision.frame_captions: false` by default; enable it for per-frame captions from the VLM (N calls per scene).
 * Local VLMs back off on OOM by halving images per request; API clients retry with exponential backoff.
 * Model downloads are cached by Hugging Face (`HF_HOME`) and CTranslate2.

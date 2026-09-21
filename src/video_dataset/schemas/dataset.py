@@ -41,6 +41,8 @@ class ClipCaptionRecord(BaseSchema):
     clip_path: str
     start_time: float
     end_time: float
+    media_duration: float | None = None  # measured length of the clip file
+    exact: bool = True  # the file covers exactly start_time..end_time (within frame_sampling.clip_tolerance_seconds)
     description: str
     actions: list[str] = Field(default_factory=list)
     camera: CameraAnnotation | None = None

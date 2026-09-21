@@ -30,9 +30,16 @@ def frame_extraction_stage(ctx: VideoContext) -> StageOutput:
     if not frames:
         raise RuntimeError("no frames could be extracted")
 
-    clips = []
+    clips: list = []
+    clip_metrics: dict = {}
     if cfg.extract_clips:
-        clips = extract_clips(ctx.video_path, ctx.video_id, scenes, frames, ctx.paths.clips_dir(ctx.video_id), cfg, info.has_audio, ctx.config.project.ffmpeg_path)
+        clips, clip_stats = extract_clips(
+            ctx.video_path, ctx.video_id, scenes, frames, ctx.paths.clips_dir(ctx.video_id), cfg, info.has_audio,
+            ctx.config.project.ffmpeg_path, ctx.config.project.ffprobe_path,
+        )
+        clip_metrics = clip_stats.as_metrics()
+        if clip_stats.reencoded:
+            log.info("%d of %d clips re-encoded for exact scene boundaries", clip_stats.reencoded, clip_stats.total)
 
     result = FrameSamplingResult(video_id=ctx.video_id, frames=frames, scans=scans, clips=clips)
     out = ctx.paths.frames_file(ctx.video_id)
@@ -43,6 +50,6 @@ def frame_extraction_stage(ctx: VideoContext) -> StageOutput:
     log.info("%d frames from %d scenes (%s), %d clips", len(frames), len(scenes), reasons, len(clips))
     return StageOutput(
         artifact_path=str(out),
-        metrics={"frames": len(frames), "clips": len(clips), "scan_samples": sum(len(s.samples) for s in scans), "reasons": reasons},
+        metrics={"frames": len(frames), "clips": len(clips), **clip_metrics, "scan_samples": sum(len(s.samples) for s in scans), "reasons": reasons},
         message=f"{len(frames)} frames extracted, {len(clips)} clips",
     )

@@ -344,6 +344,8 @@ class TemporalQAGenerator:
                     break
         return out
 
+    _STOPWORD_ENTITIES = frozenset({"the", "and", "for", "you", "are", "with", "this", "that", "from", "com", "www", "http", "https"})
+
     def _long_range(self, timeline: Timeline, by_id: dict[str, Event], duration: float) -> list[Candidate]:
         out: list[Candidate] = []
         for r in timeline.relations:
@@ -352,8 +354,12 @@ class TemporalQAGenerator:
             a, b = by_id.get(r.event_a), by_id.get(r.event_b)
             if not a or not b or (r.gap_seconds or 0) < self.cfg.long_range_min_gap_seconds:
                 continue
+            if a.event_type == EventType.TEXT_ON_SCREEN and b.event_type == EventType.TEXT_ON_SCREEN and normalize_text(a.event) == normalize_text(b.event):
+                continue  # "text X is visible ... later text X is visible again" teaches nothing
             entities = (r.rationale or "").split("shared entities:")[-1].strip() if r.rationale else ""
             ent = entities.split(",")[0].strip() if entities else "the same subject"
+            if len(ent) < 3 or ent.lower() in self._STOPWORD_ENTITIES:
+                continue
             if b.start_time >= 0.75 * duration:
                 q = f"Earlier in the video, {_phrase(a)} (around {a.start_time:.0f}s). What happens near the end of the video that involves {ent}?"
             else:

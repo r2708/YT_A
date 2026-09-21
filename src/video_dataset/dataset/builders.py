@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,8 @@ def _rel(path: str | None, base: Path | None) -> str | None:
     except ValueError:
         return path
 
+
+_LIGHT_NUMBERS = re.compile(r"\s*\([^)]*\)")  # "dim overall brightness (mean 56/255)" -> "dim overall brightness"
 
 class DatasetBuilder:
     def __init__(self, include_review: bool = True, include_rejected: bool = False, path_base: Path | None = None):
@@ -127,6 +130,8 @@ class DatasetBuilder:
                     clip_path=_rel(c.clip_path, self.path_base) or c.clip_path,
                     start_time=c.start_time,
                     end_time=c.end_time,
+                    media_duration=c.media_duration,
+                    exact=c.exact,
                     description=desc,
                     actions=a.actions,
                     camera=a.camera,
@@ -255,13 +260,29 @@ class DatasetBuilder:
                 records.append(rec)
         return records
 
+    @staticmethod
+    def _summarize(values: list[str], total: int, max_items: int = 4) -> str | None:
+        """Turn per-shot labels into one phrase: 'dim' -> 'dim throughout'; mixed -> 'mostly dim (5 of 8 shots), dark (3 of 8 shots)'."""
+        vals = [v for v in values if v]
+        if not vals:
+            return None
+        counts: dict[str, int] = {}
+        for v in vals:
+            counts[v] = counts.get(v, 0) + 1
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        if len(ranked) == 1:
+            return ranked[0][0] if total <= 1 else f"{ranked[0][0]} throughout"
+        parts = [f"{label} ({n} of {total} shots)" for label, n in ranked[:max_items]]
+        return "mostly " + parts[0] + (", " + ", ".join(parts[1:]) if len(parts) > 1 else "")
+
     def _describe_group(self, validated: ValidatedVideo, group: list[Scene], analyses: dict[str, SceneAnalysis], kept, gi: int, title: str | None) -> VideoDescriptionRecord | None:  # type: ignore[no-untyped-def]
         shots = []
         subjects: dict[str, int] = {}
         locations: list[str] = []
         actions: list[str] = []
-        cams: list[str] = []
-        lightings: list[str] = []
+        cam_labels: list[str] = []
+        light_labels: list[str] = []
+        light_temps: list[str] = []
         transitions: list[str] = []
         confs: list[float | None] = []
         for s in group:
@@ -277,16 +298,26 @@ class DatasetBuilder:
             shot = a.camera.shot_type if a.camera.shot_type != ShotType.UNKNOWN else None
             mov = MOVEMENT_PHRASES.get(a.camera.movement) if a.camera.movement != CameraMovement.UNKNOWN else None
             cam = ", ".join(x for x in [f"{shot} shot" if shot else None, mov] if x)
-            if cam and cam not in cams:
-                cams.append(cam)
-            light = a.visual_style.lighting or a.environment.lighting or (a.measurements.lighting_level if a.measurements else None)
-            if light and light not in lightings:
-                lightings.append(light)
+            if cam:
+                cam_labels.append(cam)
+            # lighting level as a label ("dim"); the per-shot numbers stay in the shot list, not the prompt
+            level = a.environment.lighting or (a.measurements.lighting_level if a.measurements else None)
+            if not level and a.visual_style.lighting:
+                level = _LIGHT_NUMBERS.sub("", a.visual_style.lighting).split(",")[0].strip()
+            if level:
+                light_labels.append(str(level).strip())
+            if a.visual_style.lighting and "color temperature" in a.visual_style.lighting:
+                light_temps.append(a.visual_style.lighting.split(",")[-1].strip())
             if s.transition_in in ("cut", "fade"):
                 transitions.append(str(s.transition_in))
             confs.append(a.confidence)
             shots.append({"scene_id": s.scene_id, "start": s.start_time, "end": s.end_time, "summary": a.summary, "camera": cam or None, "transition_in": str(s.transition_in), "temporal_progression": a.temporal_progression})
         subject = ", ".join(k for k, _ in sorted(subjects.items(), key=lambda kv: -kv[1])[:3]) or None
+        n_shots = len(group)
+        cams: list[str] = [c for c in [self._summarize(cam_labels, n_shots)] if c]
+        light_summary = self._summarize(light_labels, n_shots)
+        temp_summary = self._summarize(light_temps, n_shots, max_items=2)
+        lightings: list[str] = [x for x in [light_summary, temp_summary] if x]
         progression = " ".join(f"Shot {i + 1} ({sh['start']:.1f}-{sh['end']:.1f}s): {sh['summary']}" + (f" {sentence(str(sh['temporal_progression']))}" if sh["temporal_progression"] else "") for i, sh in enumerate(shots))
         trans_text = None
         if transitions:
@@ -302,9 +333,9 @@ class DatasetBuilder:
             prompt_parts.append("Camera: " + "; ".join(cams[:5]) + ".")
         if lightings:
             prompt_parts.append("Lighting: " + "; ".join(lightings[:3]) + ".")
-        motions = [a.visual_style.motion for a in (analyses[s.scene_id] for s in group) if a.visual_style.motion]
-        if motions:
-            prompt_parts.append("Motion: " + "; ".join(dict.fromkeys(motions).keys()) + ".")
+        motion_summary = self._summarize([a.visual_style.motion or "" for a in (analyses[s.scene_id] for s in group)], n_shots)
+        if motion_summary:
+            prompt_parts.append("Motion: " + motion_summary + ".")
         prompt_parts.append("Temporal progression: " + progression)
         if trans_text:
             prompt_parts.append(f"Transitions: {trans_text}.")
@@ -323,7 +354,7 @@ class DatasetBuilder:
             camera="; ".join(cams[:5]) or None,
             composition="; ".join(dict.fromkeys(a.visual_style.composition for a in (analyses[s.scene_id] for s in group) if a.visual_style.composition)) or None,
             lighting="; ".join(lightings[:3]) or None,
-            motion="; ".join(dict.fromkeys(motions)) or None,
+            motion=motion_summary,
             temporal_progression=progression,
             transitions=trans_text,
             prompt=" ".join(prompt_parts),

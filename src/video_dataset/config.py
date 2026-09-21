@@ -93,7 +93,12 @@ class FrameSamplingConfig(_Section):
     compute_optical_flow: bool = True
     extract_clips: bool = True
     clip_max_duration: float = 30.0
-    clip_codec: str = "copy"  # copy | libx264
+    # auto: stream-copy, then verify the file against the scene boundaries and re-encode any clip that is
+    #       off by more than clip_tolerance_seconds (stream copy can only cut at keyframes)
+    # libx264: always re-encode (exact, slower) | copy: keyframe-aligned only (fast, may include neighbours)
+    clip_codec: str = "auto"
+    clip_tolerance_seconds: float = 0.25
+    clip_max_height: int = 720  # re-encoded clips are downscaled to this height
 
 
 class TranscriptionConfig(_Section):
@@ -129,7 +134,11 @@ class OCRConfig(_Section):
     max_frames_per_scene: int = 6
     merge_similarity: float = 0.85
     merge_max_gap_seconds: float = 3.0
-    min_text_length: int = 2
+    min_text_length: int = 3  # 1-2 character reads are almost always noise
+    # Text families seen in at least this fraction of scenes (and at least static_overlay_min_scenes
+    # scenes) are watermarks / handles / logos: kept in the OCR file, excluded from events and QA.
+    static_overlay_min_scene_fraction: float = 0.3
+    static_overlay_min_scenes: int = 4
 
 
 class VisionConfig(_Section):
@@ -170,6 +179,7 @@ class TemporalConfig(_Section):
     enabled: bool = True
     include_speech_events: bool = True
     include_ocr_events: bool = True
+    include_static_overlay_text: bool = False  # watermark / fragment OCR tracks as events (normally noise)
     include_audio_events: bool = True
     include_camera_events: bool = True
     include_transitions: bool = True
