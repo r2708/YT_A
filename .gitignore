@@ -53,3 +53,8 @@ models/
 
 # OS
 .DS_Store
+
+# Coverage / CI outputs
+coverage.xml
+junit.xml
+benchmark.json

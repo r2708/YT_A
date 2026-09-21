@@ -46,19 +46,35 @@ def create_llm_client(
     base_url: str | None = None,
     api_key_env: str | None = None,
     timeout: float = 120.0,
+    requests_per_minute: float = 0.0,
     **kwargs: Any,
 ) -> LLMClient:
+    """Build a client; with `requests_per_minute` > 0 it is wrapped in a process-wide token bucket
+    shared by every caller using the same provider+model."""
     provider = (provider or "none").lower()
+    client: LLMClient
     if provider == "anthropic":
         from video_dataset.llm.anthropic_client import AnthropicClient
 
-        return AnthropicClient(model=model or "claude-opus-5", api_key_env=api_key_env, timeout=timeout, base_url=base_url, **kwargs)
-    if provider in ("openai", "openai_compatible"):
+        client = AnthropicClient(model=model or "claude-opus-5", api_key_env=api_key_env, timeout=timeout, base_url=base_url, **kwargs)
+    elif provider in ("openai", "openai_compatible"):
         from video_dataset.llm.openai_client import OpenAICompatibleClient
 
-        return OpenAICompatibleClient(model=model or "gpt-4o", base_url=base_url, api_key_env=api_key_env, timeout=timeout, **kwargs)
-    if provider == "mock":
+        client = OpenAICompatibleClient(model=model or "gpt-4o", base_url=base_url, api_key_env=api_key_env, timeout=timeout, **kwargs)
+    elif provider == "mock":
         from video_dataset.llm.mock import MockLLMClient
 
-        return MockLLMClient(model=model or "mock")
-    raise ValueError(f"Unknown LLM provider '{provider}'")
+        client = MockLLMClient(model=model or "mock")
+    else:
+        raise ValueError(f"Unknown LLM provider '{provider}'")
+    return rate_limited(client, requests_per_minute)
+
+
+def rate_limited(client: LLMClient, requests_per_minute: float) -> LLMClient:
+    from video_dataset.utils.ratelimit import RateLimitedLLMClient, get_rate_limiter
+
+    limiter = get_rate_limiter(f"{client.name}:{client.model}", requests_per_minute)
+    if limiter is None:
+        return client
+    log.info("rate limiting %s/%s to %.1f requests/minute", client.name, client.model, requests_per_minute)
+    return RateLimitedLLMClient(client, limiter)  # type: ignore[return-value]

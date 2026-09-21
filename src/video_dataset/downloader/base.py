@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from video_dataset.errors import VideoRejected
 from video_dataset.schemas.video import DownloadStatus, VideoMetadata
 from video_dataset.utils.urls import InputItem
 
@@ -25,3 +26,7 @@ class VideoSource(Protocol):
 
 class VideoUnavailableError(RuntimeError):
     """The video cannot be fetched at all (private, removed, geo-blocked). Not retried."""
+
+
+class VideoRejectedError(VideoRejected):
+    """The video violates a configured limit (URL policy, duration, size, disk space). Not retried."""

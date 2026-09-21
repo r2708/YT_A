@@ -14,7 +14,8 @@ def resolve_device(preference: str | None = "auto") -> str:
     pref = (preference or "auto").lower()
     try:
         import torch
-    except Exception:  # pragma: no cover - torch optional
+    except Exception as exc:  # pragma: no cover - torch optional
+        log.debug("torch not importable (%s); using cpu", exc)
         return "cpu"
     if pref == "cpu":
         return "cpu"
@@ -56,8 +57,8 @@ def empty_cache(device: str) -> None:
             torch.cuda.empty_cache()
         elif device == "mps" and hasattr(torch, "mps"):
             torch.mps.empty_cache()
-    except Exception:  # pragma: no cover
-        pass
+    except Exception as exc:  # pragma: no cover
+        log.debug("empty_cache(%s) failed: %s", device, exc)
 
 
 def is_oom_error(exc: BaseException) -> bool:

@@ -106,7 +106,8 @@ class PySceneDetector:
                     vals = stats.get_metrics(frame, [key])
                     if vals and vals[0] is not None:
                         return float(vals[0])
-            except Exception:
+            except Exception as exc:
+                log.debug("stats lookup for frame %d/%s failed: %s", frame, key, exc)
                 continue
         return None
 

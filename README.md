@@ -217,16 +217,17 @@ Run the same command again and every finished stage is skipped (`[SCENE] vid_…
 video-dataset run SOURCE [--workers N] [--force-from STAGE] [--until STAGE] [--no-aggregate]
 video-dataset download URL... [--process]
 video-dataset process VIDEO_ID [--force-from STAGE] [--until STAGE]
-video-dataset status [VIDEO_ID] [--json]
+video-dataset status [VIDEO_ID] [--json] [--watch SECONDS]
 video-dataset retry-failed [--until STAGE]
 video-dataset validate [VIDEO_ID]
 video-dataset export [--output DIR] [--rerun]
 video-dataset package [-o bundle.zip] [--include-media]
+video-dataset upload [--force] [--dry-run] [--status]
 video-dataset stats
 video-dataset stages
 video-dataset show-config
 video-dataset doctor
-video-dataset clean VIDEO_ID
+video-dataset clean [VIDEO_ID ...] [--files] [--intermediate] [--orphans] [--failed] [--logs] [--report] [--dry-run] [--yes]
 ```
 
 Global options (before the command): `--config FILE`, `--set key.path=value` (repeatable),
@@ -258,6 +259,21 @@ Progress lines look like:
 
 Every video also gets a JSON-lines log at `data/logs/<video_id>.log`, and `data/logs/pipeline.log`
 holds the whole run.
+
+### Monitoring a batch
+
+With more than one input, `run` prints one line per finished video with the running totals and an
+ETA, and the final summary table shows the time spent per video:
+
+```
+[cpu 12/120] vid_0a3f9c2e8b71 ok  failed=1  elapsed=07:41  eta=1:09:12
+[model 3/119] vid_77ab1c9d0e42 ok  failed=1  elapsed=21:05  eta=13:35:40
+```
+
+From another terminal, `video-dataset status --watch 5` redraws the checkpoint table every 5 s
+(the RUNNING stage is highlighted; the footer counts finished videos and running stages), and
+`video-dataset status --json` feeds dashboards or scripts. `video-dataset clean --report` shows
+how much disk each data sub-directory uses.
 
 ## Input formats
 
@@ -299,6 +315,50 @@ pipeline:        { stage_retries: 1, continue_on_error: true, workers: 1, model_
 
 `max_scene_duration` splits very long shots for analysis; those boundaries are marked
 `transition_in: split` and are **never** treated as cuts by the event/relation logic.
+
+### Cleanup, dataset growth and upload
+
+```yaml
+cleanup:
+  after_export: media          # none | media | all - see "Cleanup and disk management"
+export:
+  merge_existing: true         # rebuilding final/ keeps records of earlier videos whose per_video export is gone
+upload:
+  provider: none               # huggingface: push final/ to the Hub in shards once it reaches threshold_mb
+  repo_id: null
+  threshold_mb: 1024
+```
+
+### Input policy and resource limits
+
+```yaml
+download:
+  allowed_domains: []          # e.g. [youtube.com, youtu.be]; empty = any http(s) site yt-dlp supports
+limits:
+  max_duration_seconds: 7200   # 2 h; longer videos are rejected before a byte is downloaded (null = no limit)
+  max_file_size_gb: null       # reject downloads whose reported size exceeds this
+  min_free_disk_gb: 5          # DOWNLOAD / PREPROCESS / FRAME_EXTRACTION refuse to start below this
+  disk_check_stages: [DOWNLOAD, PREPROCESS, FRAME_EXTRACTION]
+vision:
+  requests_per_minute: 0       # API providers: cap calls per minute (token bucket shared per provider+model)
+llm:
+  requests_per_minute: 0
+```
+
+* **URL validation** happens before anything is handed to yt-dlp. Inputs must be `http(s)` URLs
+  with a public, fully qualified host: embedded credentials, private/loopback/link-local IPs,
+  `localhost`, control characters and over-long strings are dropped when the input list is read,
+  and `download.allowed_domains` (suffix match, so `youtube.com` covers `www.` and `m.`) is
+  enforced in the DOWNLOAD stage. Rejected inputs are recorded as `rejected` in `download.json`.
+* **Duration and size limits** are checked from yt-dlp's metadata through its `match_filter` hook,
+  so an over-long or over-sized video is skipped without downloading it; local files are checked
+  again after probing in PREPROCESS. Rejections are not retried and show up in
+  `video-dataset status` as `FAILED` with the reason.
+* **Disk space** is checked against `limits.min_free_disk_gb` before every stage listed in
+  `disk_check_stages`, and a download additionally has to fit its reported size on top of the floor.
+* **API rate limiting** applies to the `anthropic` / `openai_compatible` vision and LLM providers.
+  The bucket is shared process-wide per provider+model, so scene analysis, causal inference and
+  paraphrasing calling the same API draw from one quota; the SDKs' own retries still handle 429s.
 
 ## Outputs and dataset schemas
 
@@ -515,6 +575,117 @@ Rough numbers on an Apple M2 (8 GB) for a 2.5-minute 720p video with the default
 download ≈ 6 s, scene detection ≈ 5 s, scan + frames + clips ≈ 20 s, faster-whisper `base` on CPU ≈ 20 s,
 RapidOCR ≈ 10 s, everything else < 5 s.
 
+## Cleanup and disk management
+
+Per minute of 1080p video the pipeline keeps roughly 15-60 MB of original download, a same-size
+canonical `video.mp4` (a hard link when no transcode was needed, so it costs nothing extra), ~2 MB
+of 16 kHz WAV, 1-5 MB of JPEG frames and a copy of every scene as a clip. Everything except the
+exported dataset in `data/final/` can be regenerated by re-running the stage that produced it.
+
+### Automatic cleanup after export
+
+Once a video's EXPORT stage is DONE its records live in `data/final/per_video/<video_id>/`, and the
+runner deletes the working files it no longer needs, controlled by `cleanup.after_export`:
+
+| Level | Deleted when the video reaches `done` | Kept |
+|---|---|---|
+| `none` | nothing | everything |
+| `media` (default) | original `source.*`, canonical `video.mp4`, `audio.wav` | all JSON artifacts, so `--force-from VALIDATION` and `export --rerun` still work |
+| `all` | also `downloads/<id>/` metadata, scenes, audio events, transcript, OCR, annotations, QA, validated | frames and clips (referenced by the dataset), the per-video export, the log |
+
+The step is logged as `[CLEANUP] vid_... ✓ removed 3 working file(s), freed 412.7 MB` and in the
+video's `stage_log`. A cleaned video stays `done` in the checkpoint DB: running the same URL again
+reuses every checkpoint and does not re-download. To re-process it from scratch, `clean VIDEO_ID`
+(forget state) and run again; to redo a stage whose inputs were deleted, `--force-from DOWNLOAD`.
+
+### The final dataset only grows
+
+`video-dataset run` / `export` rebuild `data/final/*.jsonl`, `dataset.jsonl` and `dataset.parquet`
+from every `per_video/` export. With `export.merge_existing: true` (default) the rebuild also
+keeps the records already in the final files for videos whose per-video export folder is gone, so
+adding new videos, or re-running with a cleaned `per_video/`, never drops earlier data. A video
+that is re-exported in the current run replaces its own earlier records (matched by video id and
+record id), so the dataset never contains two versions of one video. `statistics.json` and
+`manifest.json` are recomputed over the merged set.
+
+### Automatic upload to the Hugging Face Hub
+
+Set a repo and a write token and the pipeline pushes the dataset to the Hub on its own, one shard
+at a time, as soon as the local `final/` directory reaches `upload.threshold_mb` (default 1024 MB):
+
+```bash
+echo "HF_TOKEN=hf_..." >> .env                   # a *write* token; .env is git-ignored and loaded automatically
+video-dataset run urls.txt --set upload.provider=huggingface --set upload.repo_id=my-org/my-video-dataset
+video-dataset upload --status                   # current shard size, uploaded shards
+video-dataset upload --force                    # push the current shard now, whatever its size
+video-dataset upload --dry-run --force          # show what would go
+```
+
+```yaml
+upload:
+  provider: huggingface
+  repo_id: my-org/my-video-dataset   # created as a private dataset repo on first upload
+  threshold_mb: 1024                 # 1 GB
+  include_media: false               # true also uploads the frames and clips (paths stay relative to the shard)
+  path_in_repo: ""                   # optional prefix, e.g. v1
+  after_upload: archive              # archive: keep a local copy under final/uploaded/shard_NNNN | delete: free disk
+```
+
+How it works:
+
+1. After every aggregation (`run`, `export`) the current shard is measured: the dataset files in
+   `final/` plus `per_video/` (and the referenced frames and clips when `include_media` is on).
+2. At or above the threshold the shard is hard-linked into a staging folder and uploaded to
+   `repo_id/<path_in_repo>/shard_NNNN/` in one commit (with retries). A dataset card with
+   `configs` for every record type is added to the repo the first time, so the Hub viewer works.
+3. On success the local shard is rotated: `archive` moves the files to `final/uploaded/shard_NNNN/`
+   (nothing is deleted), `delete` removes them and, with `include_media`, their frames and clips.
+   `final/` is empty again and the next videos start `shard_NNNN+1`. `final/uploads.json` records
+   every shard, its videos and the commit URL.
+4. If the upload fails, nothing is rotated: the shard stays in `final/` and is retried on the next
+   run or with `video-dataset upload --force`.
+
+The Hub dataset therefore only grows and no shard is ever uploaded twice. Media paths in the records
+are relative to the producer's data directory; with `include_media` they resolve inside the shard.
+The token is only read from the environment (`upload.token_env`) and never written to config, logs
+or the dataset.
+
+### Manual cleanup
+
+`video-dataset clean` plans first and deletes only after showing the plan (add `--dry-run` to only
+look, `--yes` to skip the prompt):
+
+| Command | What goes | When to use it |
+|---|---|---|
+| `clean --report` | nothing; prints size per sub-directory and free space | before deciding what to remove |
+| `clean --intermediate` | original `source.*` downloads (when a separate `video.mp4` exists) and `audio.wav` for videos whose EXPORT is DONE | reclaim the bulk of the space while keeping the dataset and resumability |
+| `clean --failed` | every artifact of videos whose DOWNLOAD or PREPROCESS failed (partial downloads, rejected inputs) | after a batch with many unavailable/rejected videos |
+| `clean --orphans` | artifacts of video ids that are no longer in `state.db` | after `clean VIDEO_ID` without `--files`, or a rebuilt database |
+| `clean --logs` | `data/logs/*.log` | logs are append-only and grow with every run |
+| `clean VIDEO_ID` | the video's checkpoint state only (files stay; it is re-processed from scratch next run) | reset one video |
+| `clean VIDEO_ID --files` | state **and** every artifact of that video | remove a video completely (re-export afterwards: `video-dataset export`) |
+
+What each option keeps and why:
+
+* **Frames, clips, scenes, transcripts, OCR, annotations, QA** are referenced by the exported
+  records (paths inside `frames.jsonl`, `clips.jsonl`, ...) or needed to resume later stages, so no
+  bulk option removes them. Use `clean VIDEO_ID --files` for those.
+* After `--intermediate`, `--force-from TRANSCRIPTION` on that video will fail because `audio.wav`
+  is gone; run `--force-from PREPROCESS` instead (it re-extracts the WAV from `video.mp4`).
+* The exported dataset (`data/final/`, including `per_video/`) is never touched by `clean` or the
+  automatic cleanup. Delete it by hand or re-export.
+* `data/state.db` is the checkpoint database; deleting it makes every artifact an orphan. Prefer
+  `clean VIDEO_ID` or `--force-from`.
+
+Manual equivalents when you are outside the CLI:
+
+```bash
+video-dataset clean --report                         # where does the space go?
+video-dataset clean --intermediate --failed --dry-run
+video-dataset clean --intermediate --failed --yes
+rm -rf data/frames/vid_XXXX data/clips/vid_XXXX      # same as clean vid_XXXX --files for those dirs
+```
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -537,10 +708,40 @@ RapidOCR ≈ 10 s, everything else < 5 s.
 pip install -e ".[dev]"
 ruff check src tests scripts
 mypy
-pytest -q                       # includes the end-to-end integration test on a synthetic video (~40 s)
-pytest -q -m "not slow"         # fast unit tests only
+python -m pytest -q             # includes the end-to-end integration test on a synthetic video (~40 s)
+python -m pytest -q -m "not slow"   # fast unit tests only
+python -m pytest --cov --cov-report=term --cov-report=html   # coverage report in htmlcov/index.html
 python scripts/make_test_video.py data/input/synthetic_test.mp4   # the synthetic video used by the tests
+python scripts/benchmark.py --seconds 60                          # per-stage timing on a synthetic clip
 ```
+
+Use `python -m pytest` rather than a bare `pytest` when the virtualenv was created with
+`--system-site-packages`: the system `pytest` binary runs with the system interpreter and cannot
+import the editable install.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request: `ruff` + `mypy`, then the test
+suite with coverage on Python 3.11 and 3.12 (FFmpeg and RapidOCR installed, everything else
+offline). The coverage percentage lands in the job summary and `coverage.xml` / `htmlcov/` are
+uploaded as artifacts. On `main` (and via *Run workflow*) a third job runs the benchmark on a 30 s
+synthetic clip and uploads `benchmark.json` so per-stage timings can be compared across commits.
+
+### Performance benchmarks
+
+`scripts/benchmark.py` runs the whole pipeline with the offline components (mock ASR, heuristic
+vision, energy audio events, RapidOCR when installed), reads the per-stage times the runner
+checkpoints in SQLite and prints seconds per stage plus the realtime factor (processing seconds per
+video second):
+
+```
+python scripts/benchmark.py --seconds 120                 # tile the synthetic clip to ~2 min
+python scripts/benchmark.py --video my.mp4 --set ocr.provider=none
+python scripts/benchmark.py --output bench.json --markdown
+```
+
+Numbers depend on the machine and the providers; compare runs of the same config. Model-backed
+providers (`faster_whisper`, `hf`, API backends) can be benchmarked the same way with `--set`.
 
 The integration test builds a 14-second synthetic video with three hard cuts, a fade, a scrolling
 texture (camera pan), on-screen text and a tone/silence soundtrack, runs every stage with the mock

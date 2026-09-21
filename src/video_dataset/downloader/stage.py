@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from video_dataset.downloader.local import LocalFileSource
 from video_dataset.downloader.youtube import YouTubeDownloader
+from video_dataset.errors import VideoRejected
 from video_dataset.pipeline.context import StageOutput, VideoContext
 from video_dataset.schemas.video import DownloadRecord, DownloadStatus
 from video_dataset.stages import Stage
 from video_dataset.utils.io import file_sha256, write_json_atomic
+from video_dataset.utils.urls import url_problem
 
 
 class DownloadFailed(RuntimeError):
     pass
+
+
+class DownloadRejected(DownloadFailed, VideoRejected):
+    """Blocked by a configured limit (URL policy, duration, size, disk). Retrying will not help."""
 
 
 def download_stage(ctx: VideoContext) -> StageOutput:
@@ -26,7 +32,14 @@ def download_stage(ctx: VideoContext) -> StageOutput:
             return StageOutput(artifact_path=str(meta_path), message="existing download reused", metrics={"status": "existing"})
         raise DownloadFailed("no input item and no existing download on disk")
 
-    source = LocalFileSource() if item.kind == "local" else YouTubeDownloader(ctx.config.download, ctx.config.project.ffmpeg_path)
+    if item.kind != "local":
+        problem = url_problem(item.url, ctx.config.download.allowed_domains)
+        if problem:
+            record = DownloadRecord(video_id=ctx.video_id, url=item.url, status=DownloadStatus.REJECTED, error=problem, attempts=0)
+            write_json_atomic(ctx.paths.download_record_file(ctx.video_id), record)
+            raise DownloadRejected(f"rejected URL: {problem}")
+
+    source = LocalFileSource() if item.kind == "local" else YouTubeDownloader(ctx.config.download, ctx.config.project.ffmpeg_path, ctx.config.limits)
     result = source.fetch(item, ctx.video_id, dest_dir)
 
     record = DownloadRecord(
@@ -39,8 +52,10 @@ def download_stage(ctx: VideoContext) -> StageOutput:
         attempts=result.attempts,
     )
 
-    if result.status in (DownloadStatus.FAILED, DownloadStatus.UNAVAILABLE) or result.video_path is None:
+    if result.status in (DownloadStatus.FAILED, DownloadStatus.UNAVAILABLE, DownloadStatus.REJECTED) or result.video_path is None:
         write_json_atomic(ctx.paths.download_record_file(ctx.video_id), record)
+        if result.status == DownloadStatus.REJECTED:
+            raise DownloadRejected(f"{result.status}: {result.error}")
         raise DownloadFailed(f"{result.status}: {result.error}")
 
     assert result.metadata is not None

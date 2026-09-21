@@ -25,7 +25,8 @@ def _opencv_can_decode(path: Path) -> bool:
             ok = bool(ok) and frame is not None
         cap.release()
         return ok
-    except Exception:
+    except Exception as exc:
+        log.debug("OpenCV could not open %s: %s", path, exc)
         return False
 
 

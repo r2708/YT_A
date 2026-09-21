@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", ".ts"}
 URL_FILE_EXTENSIONS = {".txt", ".urls", ".list", ".csv"}
@@ -38,6 +40,65 @@ def is_url(text: str) -> bool:
     return bool(re.match(r"^https?://", text.strip(), re.IGNORECASE))
 
 
+MAX_URL_LENGTH = 2048
+_BLOCKED_HOSTS = {"localhost", "localhost.localdomain", "0.0.0.0", "metadata.google.internal"}
+
+
+class InvalidURL(ValueError):
+    """The URL is not something the downloader should ever be handed."""
+
+
+def validate_url(url: str, allowed_domains: list[str] | None = None) -> str:
+    """Return the stripped URL or raise InvalidURL.
+
+    Rejects: non-http(s) schemes, missing/blocked hosts, embedded credentials, private/loopback/link-local
+    IP targets, control characters and over-long strings. With `allowed_domains`, the host must equal one
+    of them or be a subdomain of one (so "youtube.com" also allows "www.youtube.com").
+    """
+    url = (url or "").strip()
+    if not url:
+        raise InvalidURL("empty URL")
+    if len(url) > MAX_URL_LENGTH:
+        raise InvalidURL(f"URL longer than {MAX_URL_LENGTH} characters")
+    if any(ord(c) < 32 or ord(c) == 127 for c in url) or " " in url:
+        raise InvalidURL("URL contains whitespace or control characters")
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise InvalidURL(f"unparseable URL: {exc}") from exc
+    if parts.scheme.lower() not in ("http", "https"):
+        raise InvalidURL(f"unsupported scheme '{parts.scheme or '(none)'}'; only http/https are accepted")
+    if parts.username is not None or parts.password is not None:
+        raise InvalidURL("URLs with embedded credentials are not accepted")
+    host = (parts.hostname or "").rstrip(".").lower()
+    if not host:
+        raise InvalidURL("URL has no host")
+    if host in _BLOCKED_HOSTS:
+        raise InvalidURL(f"host '{host}' is not allowed")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+        raise InvalidURL(f"IP address {host} is not a public address")
+    if ip is None and "." not in host:
+        raise InvalidURL(f"host '{host}' is not a fully qualified domain")
+    if allowed_domains:
+        allowed = [d.strip().lower().lstrip(".") for d in allowed_domains if d and d.strip()]
+        if allowed and not any(host == d or host.endswith("." + d) for d in allowed):
+            raise InvalidURL(f"host '{host}' is not in download.allowed_domains {allowed}")
+    return url
+
+
+def url_problem(url: str, allowed_domains: list[str] | None = None) -> str | None:
+    """Non-raising variant of validate_url: returns the reason or None when the URL is fine."""
+    try:
+        validate_url(url, allowed_domains)
+    except InvalidURL as exc:
+        return str(exc)
+    return None
+
+
 def is_local_video(text: str) -> bool:
     p = Path(text.strip()).expanduser()
     return p.suffix.lower() in VIDEO_EXTENSIONS and p.exists() and p.is_file()
@@ -64,12 +125,16 @@ def classify_input(text: str) -> InputItem | None:
     if not text or text.startswith("#"):
         return None
     yt = extract_youtube_id(text)
-    if yt and (is_url(text) or _BARE_ID.match(text)):
+    if yt and _BARE_ID.match(text):
+        return InputItem(raw=text, kind="youtube", youtube_id=yt)
+    if yt and is_url(text) and url_problem(text) is None:
         return InputItem(raw=text, kind="youtube", youtube_id=yt)
     if is_local_video(text):
         return InputItem(raw=text, kind="local", local_path=str(Path(text).expanduser().resolve()))
     if is_url(text):
-        return InputItem(raw=text, kind="url")
+        if url_problem(text) is None:
+            return InputItem(raw=text, kind="url")
+        return None  # structurally invalid URL (bad host, credentials, private IP...) - never handed to yt-dlp
     return None
 
 

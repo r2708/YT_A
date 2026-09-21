@@ -44,6 +44,18 @@ class DownloadConfig(_Section):
     skip_existing: bool = True
     socket_timeout: int = 30
     extra_args: dict[str, Any] = Field(default_factory=dict)
+    # Hosts a URL may point at. Empty = any http(s) host yt-dlp supports. Suffix match, so
+    # "youtube.com" also allows "www.youtube.com" and "m.youtube.com".
+    allowed_domains: list[str] = Field(default_factory=list)
+
+
+class LimitsConfig(_Section):
+    """Resource guards checked before expensive work starts."""
+
+    max_duration_seconds: float | None = 7200.0  # videos longer than this are rejected before download
+    max_file_size_gb: float | None = None  # reject a download whose reported size exceeds this
+    min_free_disk_gb: float = 5.0  # refuse to download / extract frames when the data disk has less free space
+    disk_check_stages: list[str] = Field(default_factory=lambda: ["DOWNLOAD", "PREPROCESS", "FRAME_EXTRACTION"])
 
 
 class PreprocessConfig(_Section):
@@ -137,6 +149,7 @@ class VisionConfig(_Section):
     temperature: float = 0.0
     timeout_seconds: int = 120
     retries: int = 2
+    requests_per_minute: float = 0.0  # API providers only; 0 = unlimited (SDK retries still handle 429s)
     device: str | None = None
     torch_dtype: str = "auto"
     verify_with_model: bool = True  # run the model as verifier when it supports verification
@@ -150,6 +163,7 @@ class LLMConfig(_Section):
     max_tokens: int = 1024
     temperature: float = 0.2
     timeout_seconds: int = 120
+    requests_per_minute: float = 0.0  # 0 = unlimited
 
 
 class TemporalConfig(_Section):
@@ -221,6 +235,34 @@ class ExportConfig(_Section):
     relative_paths: bool = True
     combined_jsonl: bool = True  # also write one dataset.jsonl holding every record (tagged with record_type)
     per_type_jsonl: bool = True  # write frames.jsonl, scenes.jsonl, ... alongside
+    # Keep records of previously exported videos when the final files are rebuilt, even if their
+    # per_video/ folder is gone. New exports of the same video replace its old records (by record id).
+    merge_existing: bool = True
+
+
+class UploadConfig(_Section):
+    """Automatic upload of the exported dataset to the Hugging Face Hub in size-bounded shards."""
+
+    provider: str = "none"  # none | huggingface
+    repo_id: str | None = None  # "<user-or-org>/<dataset-name>"
+    repo_type: str = "dataset"
+    private: bool = True
+    token_env: str = "HF_TOKEN"  # environment variable holding a *write* token (never put the token in YAML)
+    threshold_mb: float = 1024.0  # upload once the current shard in final/ reaches this size
+    include_media: bool = False  # also upload the frames and clips the records reference
+    path_in_repo: str = ""  # optional prefix inside the repo, e.g. "v1"
+    after_upload: str = "archive"  # archive (move to final/uploaded/shard_NNNN, keeps a local copy) | delete (free disk)
+    retries: int = 3
+
+
+class CleanupConfig(_Section):
+    """What to delete automatically once a video has reached EXPORT (its records are in final/)."""
+
+    after_export: str = "media"  # none | media | all
+    # media: original download, canonical video.mp4 and audio.wav (the bulk); every JSON artifact stays
+    #        so `--force-from VALIDATION` / `export --rerun` still work.
+    # all:   also transcript, OCR, annotations, QA, validated and download metadata; only the frames
+    #        and clips referenced by the dataset, the per-video export and the log remain.
 
 
 class PipelineStagesConfig(_Section):
@@ -252,6 +294,7 @@ class PipelineConfig(BaseModel):
 
     project: ProjectConfig = Field(default_factory=ProjectConfig)
     download: DownloadConfig = Field(default_factory=DownloadConfig)
+    limits: LimitsConfig = Field(default_factory=LimitsConfig)
     preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
     scene_detection: SceneDetectionConfig = Field(default_factory=SceneDetectionConfig)
     frame_sampling: FrameSamplingConfig = Field(default_factory=FrameSamplingConfig)
@@ -265,6 +308,8 @@ class PipelineConfig(BaseModel):
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     deduplication: DeduplicationConfig = Field(default_factory=DeduplicationConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)
+    cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
+    upload: UploadConfig = Field(default_factory=UploadConfig)
     pipeline: PipelineStagesConfig = Field(default_factory=PipelineStagesConfig)
     presets: dict[str, Any] = Field(default_factory=dict)
 

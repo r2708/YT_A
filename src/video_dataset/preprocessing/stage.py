@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from video_dataset.errors import VideoRejected
 from video_dataset.pipeline.context import StageOutput, VideoContext
 from video_dataset.preprocessing.normalize import ensure_canonical_video, extract_audio
 from video_dataset.preprocessing.probe import probe_media
@@ -19,6 +20,12 @@ def preprocess_stage(ctx: VideoContext) -> StageOutput:
     source = sources[0] if sources else canonical
 
     src_info = probe_media(source, cfg.project.ffprobe_path)
+    max_dur = cfg.limits.max_duration_seconds
+    if max_dur and src_info.duration > float(max_dur):
+        raise VideoRejected(
+            f"video is {src_info.duration / 60:.1f} min long, over limits.max_duration_seconds ({float(max_dur) / 60:.0f} min); "
+            "raise the limit or trim the video"
+        )
     video_path, transcoded = ensure_canonical_video(source, canonical, src_info, cfg.preprocess, cfg.project.ffmpeg_path)
     info = probe_media(video_path, cfg.project.ffprobe_path) if transcoded or video_path != source else src_info
     info = info.model_copy(update={"path": str(video_path), "has_audio": src_info.has_audio, "audio": src_info.audio})

@@ -20,15 +20,19 @@ def retry_call(
     base_delay: float = 1.0,
     max_delay: float = 30.0,
     retry_on: Iterable[type[BaseException]] = (Exception,),
+    no_retry_on: Iterable[type[BaseException]] = (),
     on_retry: Callable[[BaseException, int], None] | None = None,
     label: str = "operation",
 ) -> T:
     retry_types = tuple(retry_on)
+    fatal_types = tuple(no_retry_on)
     attempt = 0
     while True:
         try:
             return fn()
         except retry_types as exc:  # type: ignore[misc]
+            if fatal_types and isinstance(exc, fatal_types):
+                raise
             attempt += 1
             if attempt > retries:
                 raise

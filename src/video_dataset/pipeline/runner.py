@@ -21,6 +21,7 @@ from video_dataset.audio.stage import audio_stage
 from video_dataset.config import PipelineConfig
 from video_dataset.dataset.stage import export_stage
 from video_dataset.downloader.stage import download_stage
+from video_dataset.errors import NonRetryableError
 from video_dataset.frame_sampling.stage import frame_extraction_stage
 from video_dataset.ocr.stage import ocr_stage
 from video_dataset.pipeline.context import StageOutput, VideoContext
@@ -32,6 +33,7 @@ from video_dataset.storage.paths import DataPaths
 from video_dataset.storage.state_db import StateDB
 from video_dataset.temporal.stage import temporal_stage
 from video_dataset.transcription.stage import transcription_stage
+from video_dataset.utils.disk import ensure_free_disk
 from video_dataset.utils.ids import make_video_id
 from video_dataset.utils.logging import get_logger, stage_line, video_log_file
 from video_dataset.utils.urls import InputItem
@@ -86,6 +88,29 @@ class VideoRunResult:
     stages_skipped: list[Stage] = field(default_factory=list)
     failed_stage: Stage | None = None
     error: str | None = None
+    seconds: float = 0.0  # wall-clock time spent on this video in this run
+
+
+@dataclass
+class ProgressEvent:
+    """Emitted by run_batch after every video finishes a phase (CPU stages, then model stages)."""
+
+    phase: str  # "cpu" | "model"
+    done: int  # videos finished in this phase so far
+    total: int  # videos in this phase
+    video_id: str
+    result: VideoRunResult
+    failed: int  # videos failed so far (all phases)
+    elapsed: float  # seconds since run_batch started
+
+    @property
+    def eta_seconds(self) -> float | None:
+        if self.done == 0:
+            return None
+        return self.elapsed / self.done * (self.total - self.done)
+
+
+ProgressFn = Callable[[ProgressEvent], None]
 
 
 class PipelineRunner:
@@ -147,6 +172,8 @@ class PipelineRunner:
             self.db.start_stage(ctx.video_id, stage)
             t0 = time.time()
             try:
+                if stage.value in set(self.config.limits.disk_check_stages or []):
+                    ensure_free_disk(self.paths.root, self.config.limits.min_free_disk_gb, label=stage.value)
                 out = fn(ctx)
                 elapsed = time.time() - t0
                 status = StageStatus.SKIPPED if out.skipped else StageStatus.DONE
@@ -158,6 +185,8 @@ class PipelineRunner:
                 elapsed = time.time() - t0
                 err = f"{type(exc).__name__}: {exc}"
                 log.debug("stage %s traceback:\n%s", stage, traceback.format_exc())
+                if isinstance(exc, NonRetryableError):
+                    retries = 0
                 if attempt <= retries:
                     log.warning(stage_line(label, ctx.video_id, f"attempt {attempt} failed: {err[:200]} - retrying", ok=False))
                     self.db.log(ctx.video_id, stage, "WARNING", f"attempt {attempt} failed: {err}")
@@ -183,6 +212,7 @@ class PipelineRunner:
             self.db.reset_stages(video_id, force_from)
         result = VideoRunResult(video_id=video_id, completed=True)
         ctx = self.context(video_id, item)
+        t_video = time.time()
         with video_log_file(video_id, self.paths.logs_dir):
             for stage in stages:
                 force = force_from is not None and STAGE_ORDER.index(stage) >= STAGE_ORDER.index(force_from)
@@ -205,8 +235,10 @@ class PipelineRunner:
                     break
             if result.completed and stages and stages[-1] == Stage.EXPORT:
                 self.db.set_video_status(video_id, "done")
+                self._cleanup_after_export(video_id)
             elif result.completed:
                 self.db.set_video_status(video_id, "processing")
+        result.seconds = time.time() - t_video
         return result
 
     # ------------------------------------------------------------------ batch
@@ -216,6 +248,7 @@ class PipelineRunner:
         force_from: Stage | None = None,
         until: Stage | None = None,
         workers: int | None = None,
+        progress: ProgressFn | None = None,
     ) -> list[VideoRunResult]:
         workers = max(1, int(workers or self.config.pipeline.workers or 1))
         stages = list(self.stages)
@@ -224,44 +257,92 @@ class PipelineRunner:
         cpu_stages = [s for s in stages if s not in MODEL_STAGES and STAGE_ORDER.index(s) < STAGE_ORDER.index(Stage.TRANSCRIPTION)]
         rest = [s for s in stages if s not in cpu_stages]
         results: dict[str, VideoRunResult] = {}
+        t_batch = time.time()
+        counter = {"done": 0}
+
+        def _report(phase: str, total: int, r: VideoRunResult) -> None:
+            if progress is None:
+                return
+            counter["done"] += 1
+            failed = sum(1 for x in results.values() if not x.completed)
+            try:
+                progress(ProgressEvent(phase, counter["done"], total, r.video_id, r, failed, time.time() - t_batch))
+            except Exception as exc:  # a broken progress hook must never kill the batch
+                log.debug("progress callback failed: %s", exc)
 
         if force_from is not None:
             for vid, _ in registered:
                 self.db.reset_stages(vid, force_from)
 
         # Phase A: download .. audio, parallel across videos
-        if workers > 1 and len(registered) > 1 and cpu_stages:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futs = {pool.submit(self.run_video, vid, item, cpu_stages): vid for vid, item in registered}
-                for fut in as_completed(futs):
-                    r = fut.result()
-                    results[r.video_id] = r
-        else:
-            for vid, item in registered:
-                results[vid] = self.run_video(vid, item, cpu_stages)
+        if cpu_stages:
+            if workers > 1 and len(registered) > 1:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futs = {pool.submit(self.run_video, vid, item, cpu_stages): vid for vid, item in registered}
+                    for fut in as_completed(futs):
+                        r = fut.result()
+                        results[r.video_id] = r
+                        _report("cpu", len(registered), r)
+            else:
+                for vid, item in registered:
+                    results[vid] = self.run_video(vid, item, cpu_stages)
+                    _report("cpu", len(registered), results[vid])
 
         # Phase B: model stages, sequential (models load once)
+        counter["done"] = 0
+        pending = [(vid, item) for vid, item in registered if results.get(vid) is None or results[vid].completed]
         if rest and (self.config.pipeline.model_stages_sequential or workers == 1):
-            for vid, item in registered:
+            for vid, item in pending:
                 prev = results.get(vid)
-                if prev is not None and not prev.completed:
-                    continue
                 r = self.run_video(vid, item, rest)
                 if prev is not None:
                     r.stages_run = prev.stages_run + r.stages_run
                     r.stages_cached = prev.stages_cached + r.stages_cached
                     r.stages_skipped = prev.stages_skipped + r.stages_skipped
+                    r.seconds += prev.seconds
                 results[vid] = r
+                _report("model", len(pending), r)
         elif rest:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                futs = {pool.submit(self.run_video, vid, item, rest): vid for vid, item in registered if results.get(vid) is None or results[vid].completed}
+                futs = {pool.submit(self.run_video, vid, item, rest): vid for vid, item in pending}
                 for fut in as_completed(futs):
                     r = fut.result()
+                    prev = results.get(r.video_id)
+                    if prev is not None:
+                        r.stages_run = prev.stages_run + r.stages_run
+                        r.stages_cached = prev.stages_cached + r.stages_cached
+                        r.stages_skipped = prev.stages_skipped + r.stages_skipped
+                        r.seconds += prev.seconds
                     results[r.video_id] = r
+                    _report("model", len(pending), r)
 
         ordered = [results[vid] for vid, _ in registered if vid in results]
         self._release_models()
         return ordered
+
+    def _cleanup_after_export(self, video_id: str) -> None:
+        """Delete the working files a finished video no longer needs (cleanup.after_export).
+
+        Runs every time a video ends a run in the `done` state and is idempotent: only paths that still
+        exist are planned. The per-video export under final/per_video, the frames and clips it references
+        and the log are never touched, so rebuilding the final dataset keeps this video's records.
+        """
+        from video_dataset.storage.cleanup import apply_plan, plan_after_export
+
+        level = (self.config.cleanup.after_export or "none").lower()
+        if level == "none":
+            return
+        try:
+            plan = plan_after_export(self.paths, video_id, level)
+        except ValueError as exc:
+            log.error("cleanup skipped for %s: %s", video_id, exc)
+            return
+        if not plan.paths:
+            return
+        removed, freed = apply_plan(plan)
+        msg = f"removed {removed} working file(s), freed {freed / 1e6:.1f} MB (cleanup.after_export={level})"
+        self.db.log(video_id, "CLEANUP", "INFO", msg)
+        log.info(stage_line("CLEANUP", video_id, msg, ok=True))
 
     def _release_models(self) -> None:
         for key, model in list(self.models.items()):
@@ -269,8 +350,8 @@ class PipelineRunner:
             if callable(close):
                 try:
                     close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("failed to release model %s cleanly: %s: %s", key, type(exc).__name__, exc)
             self.models.pop(key, None)
 
     # ------------------------------------------------------------------ maintenance

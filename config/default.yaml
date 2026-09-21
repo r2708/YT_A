@@ -21,6 +21,13 @@ download:
   skip_existing: true
   socket_timeout: 30
   extra_args: {}           # passed straight to yt-dlp options
+  allowed_domains: []      # e.g. [youtube.com, youtu.be]; empty = any http(s) site yt-dlp supports
+
+limits:
+  max_duration_seconds: 7200   # 2 h; longer videos are rejected before download (null = no limit)
+  max_file_size_gb: null       # reject downloads whose reported size is above this (null = no limit)
+  min_free_disk_gb: 5          # DOWNLOAD / PREPROCESS / FRAME_EXTRACTION refuse to start below this
+  disk_check_stages: [DOWNLOAD, PREPROCESS, FRAME_EXTRACTION]
 
 preprocess:
   audio_sample_rate: 16000 # 16 kHz mono PCM is what speech models expect
@@ -107,6 +114,7 @@ vision:
   temperature: 0.0
   timeout_seconds: 120
   retries: 2
+  requests_per_minute: 0   # API providers only: cap calls per minute (0 = unlimited)
   device: null
   torch_dtype: auto
   verify_with_model: true
@@ -119,6 +127,7 @@ llm:
   max_tokens: 1024
   temperature: 0.2
   timeout_seconds: 120
+  requests_per_minute: 0   # 0 = unlimited
 
 temporal:
   enabled: true
@@ -182,3 +191,22 @@ export:
   relative_paths: true
   combined_jsonl: true     # one dataset.jsonl with every record (each line carries record_type) - upload a single file
   per_type_jsonl: true     # also write frames.jsonl, clips.jsonl, scenes.jsonl, events.jsonl, temporal_qa.jsonl, ...
+  merge_existing: true     # rebuilding final/ keeps records of earlier videos whose per_video/ export is gone
+
+upload:
+  provider: none           # none | huggingface - upload final/ automatically once it reaches threshold_mb
+  repo_id: null            # "<user-or-org>/<dataset-name>"; created (private) on first upload if missing
+  repo_type: dataset
+  private: true
+  token_env: HF_TOKEN      # write token read from the environment / .env; never put it in this file
+  threshold_mb: 1024       # 1 GB: when the current shard (dataset files [+ media]) reaches this, it is uploaded
+  include_media: false     # also upload frames/ and clips/ of the shard's videos (much larger)
+  path_in_repo: ""         # optional prefix inside the repo, e.g. "v1"
+  after_upload: archive    # archive: move the uploaded shard to final/uploaded/shard_NNNN (nothing deleted)
+                           # delete:  remove the local copy (and its media when include_media) to free disk
+  retries: 3
+
+cleanup:
+  after_export: media      # none | media | all - what to delete automatically once a video's EXPORT is DONE
+                           # media: source download, video.mp4, audio.wav; all: every working file except
+                           # frames, clips (referenced by the dataset), the per-video export and the log

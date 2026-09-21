@@ -66,6 +66,7 @@ class DownloadStatus(StrEnum):
     FAILED = "failed"
     SKIPPED_EXISTING = "skipped_existing"
     UNAVAILABLE = "unavailable"
+    REJECTED = "rejected"  # blocked by policy before download: URL/domain, duration, size or disk limits
 
 
 class DownloadRecord(BaseSchema):

@@ -82,6 +82,9 @@ def create_vision_analyzer(cfg: VisionConfig, device_pref: str = "auto") -> Visi
         from video_dataset.llm.base import create_llm_client
         from video_dataset.vision.api_analyzer import APIVisionAnalyzer
 
-        client = create_llm_client(provider, cfg.model, cfg.base_url, cfg.api_key_env, float(cfg.timeout_seconds), image_max_side=cfg.image_max_side)
+        client = create_llm_client(
+            provider, cfg.model, cfg.base_url, cfg.api_key_env, float(cfg.timeout_seconds),
+            requests_per_minute=float(cfg.requests_per_minute), image_max_side=cfg.image_max_side,
+        )
         return APIVisionAnalyzer(client, cfg)
     raise ValueError(f"Unknown vision provider '{cfg.provider}'")

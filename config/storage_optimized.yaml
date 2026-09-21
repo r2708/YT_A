@@ -1,0 +1,27 @@
+# Storage-Optimized Configuration
+# Reduces disk usage by ~40% compared to default
+# Usage: video-dataset run urls.txt --config config/storage_optimized.yaml
+
+# Reduce frame extraction
+frame_sampling:
+  min_frames_per_scene: 2          # Default: 3
+  max_frames_per_scene: 12         # Default: 20
+  jpeg_quality: 80                 # Default: 90 (reduces JPEG size)
+  max_frame_side: 1024             # Default: 1280 (smaller images)
+  extract_clips: false             # Don't create video clips (saves ~30%!)
+
+# Optimize OCR
+ocr:
+  enabled: true
+  provider: rapidocr
+  max_frames_per_scene: 4          # Default: 6
+
+# Export only essential formats
+export:
+  formats: [parquet]               # Only Parquet (smaller than JSONL)
+  include_review: false            # Only accepted records
+  include_rejected: false
+  combined_jsonl: false            # Skip combined JSONL
+  per_type_jsonl: false            # Skip per-type JSONL files
+
+# All other settings inherited from default.yaml

@@ -43,7 +43,7 @@ def temporal_stage(ctx: VideoContext) -> StageOutput:
     if cfg.temporal.causal_inference == "llm" and cfg.llm.provider not in ("none", None):
         from video_dataset.llm.base import create_llm_client
 
-        client = ctx.get_model(f"llm:{cfg.llm.provider}:{cfg.llm.model}", lambda: create_llm_client(cfg.llm.provider, cfg.llm.model, cfg.llm.base_url, cfg.llm.api_key_env, float(cfg.llm.timeout_seconds)))
+        client = ctx.get_model(f"llm:{cfg.llm.provider}:{cfg.llm.model}", lambda: create_llm_client(cfg.llm.provider, cfg.llm.model, cfg.llm.base_url, cfg.llm.api_key_env, float(cfg.llm.timeout_seconds), requests_per_minute=float(cfg.llm.requests_per_minute)))
         causal = LLMCausalInferencer(client)  # type: ignore[assignment]
     relations += causal.infer(ctx.video_id, events, relations)
 

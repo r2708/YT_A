@@ -34,7 +34,7 @@ def qa_stage(ctx: VideoContext) -> StageOutput:
         from video_dataset.llm.base import create_llm_client
         from video_dataset.questions.paraphrase import Paraphraser
 
-        client = ctx.get_model(f"llm:{cfg.llm.provider}:{cfg.llm.model}", lambda: create_llm_client(cfg.llm.provider, cfg.llm.model, cfg.llm.base_url, cfg.llm.api_key_env, float(cfg.llm.timeout_seconds)))
+        client = ctx.get_model(f"llm:{cfg.llm.provider}:{cfg.llm.model}", lambda: create_llm_client(cfg.llm.provider, cfg.llm.model, cfg.llm.base_url, cfg.llm.api_key_env, float(cfg.llm.timeout_seconds), requests_per_minute=float(cfg.llm.requests_per_minute)))
         paraphrased = Paraphraser(client).paraphrase(records)
 
     result = QAResult(video_id=ctx.video_id, generator=generator.name, questions=records)

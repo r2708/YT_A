@@ -6,9 +6,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from video_dataset.config import DownloadConfig
-from video_dataset.downloader.base import FetchResult, VideoUnavailableError
+from video_dataset.config import DownloadConfig, LimitsConfig
+from video_dataset.downloader.base import FetchResult, VideoRejectedError, VideoUnavailableError
 from video_dataset.schemas.video import DownloadStatus, SourceType, VideoMetadata
+from video_dataset.utils.disk import free_bytes
 from video_dataset.utils.ffmpeg import find_ffmpeg
 from video_dataset.utils.logging import get_logger
 from video_dataset.utils.retry import retry_call
@@ -68,9 +69,29 @@ def _parse_rate_limit(value: str | None) -> int | None:
 class YouTubeDownloader:
     name = "yt_dlp"
 
-    def __init__(self, config: DownloadConfig, ffmpeg_path: str | None = None):
+    def __init__(self, config: DownloadConfig, ffmpeg_path: str | None = None, limits: LimitsConfig | None = None):
         self.config = config
         self.ffmpeg_path = ffmpeg_path
+        self.limits = limits or LimitsConfig()
+
+    # -------------------------------------------------------------- limits
+    def check_limits(self, info: dict[str, Any], dest_dir: Path | None = None) -> str | None:
+        """Reason the video must not be downloaded (duration / size / disk), or None. Uses yt-dlp's
+        metadata so the decision is made before any media bytes are transferred."""
+        lim = self.limits
+        duration = info.get("duration")
+        if lim.max_duration_seconds and duration and float(duration) > float(lim.max_duration_seconds):
+            return f"duration {float(duration) / 60:.1f} min exceeds limits.max_duration_seconds ({float(lim.max_duration_seconds) / 60:.0f} min)"
+        size = info.get("filesize") or info.get("filesize_approx")
+        if size:
+            size = int(size)
+            if lim.max_file_size_gb and size > float(lim.max_file_size_gb) * 1e9:
+                return f"reported size {size / 1e9:.2f} GB exceeds limits.max_file_size_gb ({lim.max_file_size_gb})"
+            if dest_dir is not None and lim.min_free_disk_gb is not None:
+                free = free_bytes(dest_dir)
+                if free < size + float(lim.min_free_disk_gb) * 1e9:
+                    return f"not enough disk: {free / 1e9:.1f} GB free, download needs {size / 1e9:.2f} GB plus a {lim.min_free_disk_gb} GB floor"
+        return None
 
     # -------------------------------------------------------------- options
     def build_options(self, dest_dir: Path) -> dict[str, Any]:
@@ -102,8 +123,8 @@ class YouTubeDownloader:
         }
         try:
             opts["ffmpeg_location"] = str(Path(find_ffmpeg(self.ffmpeg_path)).parent)
-        except Exception:  # pragma: no cover - ffmpeg checked earlier by `doctor`
-            pass
+        except Exception as exc:  # pragma: no cover - ffmpeg checked earlier by `doctor`
+            log.warning("ffmpeg not found (%s); yt-dlp will look for it on PATH and cannot merge streams without it", exc)
         if self.config.cookies_file:
             opts["cookiefile"] = str(Path(self.config.cookies_file).expanduser())
         rl = _parse_rate_limit(self.config.rate_limit)
@@ -157,6 +178,19 @@ class YouTubeDownloader:
             opts["skip_download"] = True  # still refresh metadata cheaply
 
         attempts = {"n": 0}
+        rejected: dict[str, str] = {}
+
+        def _match_filter(info: dict[str, Any], *, incomplete: bool = False) -> str | None:
+            # yt-dlp calls this with the metadata before downloading; a string skips the download.
+            if incomplete:
+                return None
+            reason = self.check_limits(info, dest_dir)
+            if reason:
+                rejected["reason"] = reason
+            return reason
+
+        if existing is None:
+            opts["match_filter"] = _match_filter
 
         def _run() -> dict[str, Any]:
             attempts["n"] += 1
@@ -169,6 +203,8 @@ class YouTubeDownloader:
                     if not entries:
                         raise VideoUnavailableError("playlist contained no downloadable entries")
                     info = entries[0]
+                if rejected.get("reason"):
+                    raise VideoRejectedError(rejected["reason"])
                 return dict(info)
 
         def _classify(exc: BaseException) -> None:
@@ -183,12 +219,16 @@ class YouTubeDownloader:
                     retries=max(0, int(self.config.retries) - 1),
                     base_delay=2.0,
                     retry_on=(DownloadError, ExtractorError, OSError, RuntimeError),
+                    no_retry_on=(VideoRejectedError, VideoUnavailableError),
                     on_retry=lambda exc, _n: _classify(exc),
                     label=f"download {url}",
                 )
             except (DownloadError, ExtractorError) as exc:
                 _classify(exc)
                 raise
+        except VideoRejectedError as exc:
+            log.warning("rejected %s: %s", url, exc)
+            return FetchResult(DownloadStatus.REJECTED, None, None, error=str(exc)[:500], attempts=attempts["n"])
         except VideoUnavailableError as exc:
             return FetchResult(DownloadStatus.UNAVAILABLE, None, None, error=str(exc)[:500], attempts=attempts["n"])
         except Exception as exc:

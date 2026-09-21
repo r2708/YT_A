@@ -130,14 +130,14 @@ def scan_video(
     finally:
         try:
             proc.stdout.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("closing ffmpeg stdout failed: %s", exc)
         stderr = b""
         if proc.stderr is not None:
             try:
                 stderr = proc.stderr.read()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("reading ffmpeg stderr failed: %s", exc)
         proc.wait(timeout=30)
     if n == 0:
         raise RuntimeError(f"scan produced no frames: {stderr.decode(errors='ignore')[:500]}")
