@@ -36,7 +36,7 @@ from video_dataset.transcription.stage import transcription_stage
 from video_dataset.utils.disk import ensure_free_disk
 from video_dataset.utils.ids import make_video_id
 from video_dataset.utils.logging import get_logger, stage_line, video_log_file
-from video_dataset.utils.urls import InputItem
+from video_dataset.utils.urls import InputItem, item_from_stored_url
 from video_dataset.validation.stage import validation_stage
 from video_dataset.vision.stage import vision_stage
 
@@ -148,6 +148,16 @@ class PipelineRunner:
     def context(self, video_id: str, item: InputItem | None = None) -> VideoContext:
         return VideoContext(video_id=video_id, config=self.config, paths=self.paths, db=self.db, input_item=item, models=self.models)
 
+    def input_for(self, video_id: str) -> InputItem | None:
+        """The InputItem of a registered video, rebuilt from the URL stored at registration time.
+
+        Lets `resume`, `retry-failed` and `process` download a video that was registered but never
+        fetched before the process died, without the original URL file."""
+        row = self.db.get_video(video_id)
+        if not row or not row.get("url"):
+            return None
+        return item_from_stored_url(str(row["url"]))
+
     # ------------------------------------------------------------------ single stage
     def run_stage(self, ctx: VideoContext, stage: Stage, force: bool = False) -> tuple[StageStatus, bool]:
         """Returns (status, executed). executed=False means the checkpoint was reused."""
@@ -210,6 +220,8 @@ class PipelineRunner:
             stages = [s for s in stages if STAGE_ORDER.index(s) <= STAGE_ORDER.index(until)]
         if force_from is not None:
             self.db.reset_stages(video_id, force_from)
+        if item is None:
+            item = self.input_for(video_id)
         result = VideoRunResult(video_id=video_id, completed=True)
         ctx = self.context(video_id, item)
         t_video = time.time()
@@ -355,6 +367,42 @@ class PipelineRunner:
             self.models.pop(key, None)
 
     # ------------------------------------------------------------------ maintenance
+    REJECTED_ERRORS = ("DownloadRejected:", "VideoRejected:", "VideoRejectedError:")
+
+    def unfinished_videos(self, include_rejected: bool = False) -> list[tuple[str, InputItem | None]]:
+        """Every registered video that has not reached EXPORT, in registration order.
+
+        Videos whose failure was a policy rejection (URL/domain, duration, size) are skipped unless
+        `include_rejected`, because re-running them cannot succeed until the limits change."""
+        out: list[tuple[str, InputItem | None]] = []
+        for v in self.db.list_videos():
+            vid = v["video_id"]
+            if v.get("status") == "done" and self.db.is_done(vid, Stage.EXPORT):
+                continue
+            if not include_rejected:
+                err = str(v.get("last_error") or "")
+                if err.startswith(self.REJECTED_ERRORS):
+                    log.info("resume: skipping %s (rejected: %s)", vid, err[:120])
+                    continue
+            out.append((vid, self.input_for(vid)))
+        return out
+
+    def resume(
+        self,
+        until: Stage | None = None,
+        workers: int | None = None,
+        include_rejected: bool = False,
+        progress: ProgressFn | None = None,
+    ) -> list[VideoRunResult]:
+        """Continue every unfinished video from its first non-DONE stage (after a crash, shutdown or
+        Ctrl-C). DONE stages are reused, interrupted ones were marked FAILED at start-up and re-run,
+        never-started videos are downloaded from the URL stored in the database."""
+        pending = self.unfinished_videos(include_rejected)
+        if not pending:
+            return []
+        log.info("resuming %d unfinished video(s)", len(pending))
+        return self.run_batch(pending, until=until, workers=workers, progress=progress)
+
     def retry_failed(self, until: Stage | None = None) -> list[VideoRunResult]:
         failed = self.db.failed_stages()
         by_video: dict[str, Stage] = {}

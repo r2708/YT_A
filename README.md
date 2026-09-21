@@ -216,6 +216,7 @@ Run the same command again and every finished stage is skipped (`[SCENE] vid_…
 ```
 video-dataset run SOURCE [--workers N] [--force-from STAGE] [--until STAGE] [--no-aggregate]
 video-dataset download URL... [--process]
+video-dataset resume [--workers N] [--until STAGE] [--include-rejected] [--no-aggregate]
 video-dataset process VIDEO_ID [--force-from STAGE] [--until STAGE]
 video-dataset status [VIDEO_ID] [--json] [--watch SECONDS]
 video-dataset retry-failed [--until STAGE]
@@ -529,6 +530,31 @@ TEMPORAL_ANALYSIS PENDING
 Optional stages (`AUDIO`, `TRANSCRIPTION`, `OCR`) may fail without stopping the video; later stages
 simply work without those inputs. A failure in any other stage stops that video only; the batch
 continues and `video-dataset retry-failed` re-runs from the first failed stage.
+
+### What happens after a crash or shutdown
+
+Say `video-dataset run urls.txt` was started with 10 URLs and the machine went down while video 4
+was in `FRAME_EXTRACTION`. Every URL was registered in `state.db` at start-up, every finished stage
+was committed the moment it finished (WAL journal, atomic JSON writes, `.part` downloads that
+yt-dlp resumes), so on the next start:
+
+```bash
+video-dataset resume            # or: video-dataset run urls.txt  (same result, needs the file)
+```
+
+* videos 1-3: every stage `DONE` -> reused, nothing re-runs (they are `done`, their after-export
+  cleanup already happened);
+* video 4: `DOWNLOAD`..`SCENE_DETECTION` reused; the `FRAME_EXTRACTION` row left `RUNNING` is marked
+  `FAILED (interrupted)` at start-up and re-run from scratch (a `VISION_ANALYSIS` interruption
+  resumes at the next un-analysed scene instead);
+* videos 5-10: never started, so they are downloaded and processed now. `resume` rebuilds their
+  input from the URL stored at registration, which is why the URL file is optional.
+
+`resume` runs the same batch logic as `run` (parallel CPU stages, sequential model stages,
+progress lines, aggregation and the automatic upload at the end). Videos that were *rejected* by a
+limit (URL policy, duration, size) are skipped unless `--include-rejected`, because they would fail
+the same way. `status` shows where each video stopped; `retry-failed` is the narrower variant that
+only touches videos with a `FAILED` stage.
 
 ## Confidence, quality and hallucination control
 

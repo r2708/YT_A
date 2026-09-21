@@ -283,6 +283,10 @@ def check_and_upload(
 
     final_dir = config.export_dir
     data_dir = config.data_dir
+    for stale in final_dir.glob("vd-upload-*") if final_dir.exists() else []:
+        if stale.is_dir():  # staging left behind by a process killed mid-upload (hard links: no data lost)
+            shutil.rmtree(stale, ignore_errors=True)
+            log.info("removed stale upload staging dir %s", stale.name)
     size, files, videos = measure_shard(final_dir, data_dir, bool(cfg.include_media))
     threshold = float(cfg.threshold_mb) * 1024 * 1024
     if files == 0 or not videos:

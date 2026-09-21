@@ -138,6 +138,22 @@ def classify_input(text: str) -> InputItem | None:
     return None
 
 
+def item_from_stored_url(url: str) -> InputItem | None:
+    """Rebuild the input for a video registered earlier (videos.url in state.db), so a batch can be
+    resumed without the original URL file. Local files were stored as file:// URIs."""
+    url = (url or "").strip()
+    if url.startswith("file://"):
+        from urllib.parse import unquote, urlsplit
+        from urllib.request import url2pathname
+
+        path = url2pathname(unquote(urlsplit(url).path))
+        p = Path(path)
+        if p.exists() and p.is_file():
+            return InputItem(raw=str(p), kind="local", local_path=str(p.resolve()))
+        return None
+    return classify_input(url)
+
+
 def read_url_file(path: str | Path) -> list[InputItem]:
     items: list[InputItem] = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():

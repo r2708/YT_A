@@ -238,6 +238,44 @@ def run(
 
 
 @app.command()
+def resume(
+    workers: Annotated[int | None, typer.Option("--workers", "-w", help="Parallel videos for CPU stages")] = None,
+    until: Annotated[str | None, typer.Option("--until", help="Stop after this stage")] = None,
+    include_rejected: Annotated[bool, typer.Option("--include-rejected", help="Also retry videos rejected by URL/duration/size limits")] = False,
+    no_aggregate: Annotated[bool, typer.Option("--no-aggregate", help="Skip merging per-video exports into final/")] = False,
+    config: ConfigOpt = None,
+    set_: SetOpt = None,
+) -> None:
+    """Continue every unfinished video after a crash or shutdown - no URL file needed (inputs come from state.db)."""
+    from video_dataset.dataset.aggregate import aggregate_exports
+
+    _apply_local_options(config, set_)
+    runner = _runner()
+    t0 = time.time()
+    try:
+        pending = runner.unfinished_videos(include_rejected)
+        if not pending:
+            console.print("Nothing to resume: every registered video is done.")
+            return
+        missing = [vid for vid, item in pending if item is None and not runner.paths.source_candidates(vid)]
+        for vid in missing:
+            console.print(f"[yellow]{vid}: no stored input and no download on disk; it will fail at DOWNLOAD[/yellow]")
+        console.print(f"Resuming {len(pending)} unfinished video(s)")
+        results = runner.run_batch(
+            pending, until=parse_stage(until) if until else None, workers=workers,
+            progress=_progress_printer() if len(pending) > 1 else None,
+        )
+        _print_results(results, elapsed=time.time() - t0)
+        if not no_aggregate and (until is None or parse_stage(until) == Stage.EXPORT):
+            stats = aggregate_exports(runner.config, runner.db)
+            console.print(f"Final dataset written to {runner.config.export_dir} ({stats['temporal_qa']} temporal QA, {stats['long_video_qa']} long-video QA)")
+            _maybe_upload(runner.config)
+        raise typer.Exit(0 if all(r.completed for r in results) else 2)
+    finally:
+        runner.close()
+
+
+@app.command()
 def process(
     video_id: Annotated[str, typer.Argument(help="Registered video id (see `status`)")],
     force_from: Annotated[str | None, typer.Option("--force-from", help="Re-run this stage and everything after it")] = None,
