@@ -214,4 +214,7 @@ upload:
 cleanup:
   after_export: media      # none | media | all - what to delete automatically once a video's EXPORT is DONE
                            # media: source download, video.mp4, audio.wav; all: every working file except
-                           # frames, clips (referenced by the dataset), the per-video export and the log
+                           # the per-video export and the log
+  frames_and_clips: true   # with media/all: also delete frames/<id>/ (the scene_NNN folders) and clips/<id>/
+                           # once the video is done. Set false to keep the media the records point at.
+                           # Ignored while upload.include_media is on (the shard needs the files first).

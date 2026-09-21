@@ -322,6 +322,7 @@ pipeline:        { stage_retries: 1, continue_on_error: true, workers: 1, model_
 ```yaml
 cleanup:
   after_export: media          # none | media | all - see "Cleanup and disk management"
+  frames_and_clips: true       # also delete frames/<id>/ (scene_NNN folders) and clips/<id>/ once a video is done
 export:
   merge_existing: true         # rebuilding final/ keeps records of earlier videos whose per_video export is gone
 upload:
@@ -621,12 +622,21 @@ runner deletes the working files it no longer needs, controlled by `cleanup.afte
 |---|---|---|
 | `none` | nothing | everything |
 | `media` (default) | original `source.*`, canonical `video.mp4`, `audio.wav` | all JSON artifacts, so `--force-from VALIDATION` and `export --rerun` still work |
-| `all` | also `downloads/<id>/` metadata, scenes, audio events, transcript, OCR, annotations, QA, validated | frames and clips (referenced by the dataset), the per-video export, the log |
+| `all` | also `downloads/<id>/` metadata, scenes, audio events, transcript, OCR, annotations, QA, validated | the per-video export, the log |
 
-The step is logged as `[CLEANUP] vid_... ✓ removed 3 working file(s), freed 412.7 MB` and in the
+`cleanup.frames_and_clips` (default `true`) adds the whole `frames/<id>/` directory, i.e. the
+`scene_NNN` folders and `frames.json`, and `clips/<id>/` to either level. The exported records keep
+their `frame_path` / `clip_path` values, but the files are gone; set it to `false` when the dataset
+consumer needs the media on this machine. It is ignored while `upload.include_media` is on, because
+the shard has to bundle the media first; with `upload.after_upload: delete` the uploader removes
+them afterwards.
+
+The step is logged as `[CLEANUP] vid_... ✓ removed 5 working file(s), freed 412.7 MB` and in the
 video's `stage_log`. A cleaned video stays `done` in the checkpoint DB: running the same URL again
 reuses every checkpoint and does not re-download. To re-process it from scratch, `clean VIDEO_ID`
-(forget state) and run again; to redo a stage whose inputs were deleted, `--force-from DOWNLOAD`.
+(forget state) and run again; to redo a stage whose inputs were deleted, `--force-from DOWNLOAD`
+(with the frames gone, any stage from `FRAME_EXTRACTION` on needs `video.mp4` back, so `DOWNLOAD`
+is the safe starting point).
 
 ### The final dataset only grows
 
@@ -699,7 +709,8 @@ What each option keeps and why:
 
 * **Frames, clips, scenes, transcripts, OCR, annotations, QA** are referenced by the exported
   records (paths inside `frames.jsonl`, `clips.jsonl`, ...) or needed to resume later stages, so no
-  bulk option removes them. Use `clean VIDEO_ID --files` for those.
+  bulk `clean` option removes them. The automatic after-export cleanup does delete frames and clips
+  (`cleanup.frames_and_clips`); use `clean VIDEO_ID --files` to remove the rest.
 * After `--intermediate`, `--force-from TRANSCRIPTION` on that video will fail because `audio.wav`
   is gone; run `--force-from PREPROCESS` instead (it re-extracts the WAV from `video.mp4`).
 * The exported dataset (`data/final/`, including `per_video/`) is never touched by `clean` or the

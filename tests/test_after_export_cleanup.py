@@ -66,10 +66,21 @@ def test_plan_after_export_levels(tmp_path: Path):
     with pytest.raises(ValueError):
         cl.plan_after_export(paths, vid, "everything")
 
+    # frames_and_clips adds the whole frames/<id>/ (scene_NNN folders + frames.json) and clips/<id>/ dirs
+    assert cl.plan_after_export(paths, vid, "none", frames_and_clips=True).paths == []
+    with_media = cl.plan_after_export(paths, vid, "media", frames_and_clips=True)
+    assert set(with_media.paths) == {f["source"], f["video"], f["wav"], paths.frames_dir(vid), paths.clips_dir(vid)}
+    assert with_media.bytes == 250 + 5 + 5 + 20
+    assert f["log"] not in with_media.paths
+
     removed, freed = cl.apply_plan(full)
     assert removed == len(full.paths) and freed == full.bytes
     assert not paths.video_dir(vid).exists() and not f["wav"].exists() and not f["validated"].exists()
     assert f["frame"].exists() and f["clip"].exists() and f["log"].exists()
+
+    cl.apply_plan(cl.plan_after_export(paths, vid, "media", frames_and_clips=True))
+    assert not paths.frames_dir(vid).exists() and not paths.clips_dir(vid).exists()
+    assert not (paths.frames_dir(vid) / "scene_001").exists() and f["log"].exists()
 
 
 # --------------------------------------------------------------------------- runner integration
@@ -91,13 +102,13 @@ def test_runner_cleans_after_export_and_keeps_dataset(synthetic_video: Path, tes
         assert res.completed, res.error
         paths = runner.paths
 
-        # working files gone ...
+        # working files gone, including the frames/<id>/scene_NNN folders and clips/<id>/ ...
         assert not paths.video_dir(vid).exists()
         assert not paths.audio_file(vid).exists() and not paths.validated_file(vid).exists()
         assert not paths.annotations_dir(vid).exists() and not paths.qa_file(vid).exists()
-        # ... dataset media, per-video export and log kept
-        assert any(paths.frames_dir(vid).rglob("*.jpg")) and paths.frames_file(vid).exists()
-        assert paths.clips_dir(vid).exists() and paths.video_log_file(vid).exists()
+        assert not paths.frames_dir(vid).exists() and not paths.clips_dir(vid).exists()
+        # ... per-video export and log kept
+        assert paths.video_log_file(vid).exists()
         per_video = cfg.export_dir / "per_video" / vid
         assert (per_video / "manifest.json").exists() and (per_video / "frames.jsonl").exists()
         assert runner.db.get_video(vid)["status"] == "done"  # type: ignore[index]
@@ -106,7 +117,7 @@ def test_runner_cleans_after_export_and_keeps_dataset(synthetic_video: Path, tes
         stats = aggregate_exports(cfg, runner.db)
         assert stats["frames"] >= 12
         frame_rows = list(read_jsonl(cfg.export_dir / "frames.jsonl"))
-        assert frame_rows and all((cfg.data_dir / r["frame_path"]).exists() for r in frame_rows)
+        assert frame_rows and all(r["frame_path"].startswith("frames/") for r in frame_rows)
 
         # re-running the same input reuses every checkpoint: nothing re-downloaded, nothing re-run
         res2 = runner.run_batch(registered)[0]
@@ -196,3 +207,31 @@ def test_load_existing_records_falls_back_to_combined_file(tmp_path: Path):
     assert [r["record_id"] for r in existing["frames"]] == ["f"] and [r["record_id"] for r in existing["events"]] == ["e"]
     assert "record_type" not in existing["frames"][0]
     assert json.dumps(existing["temporal_qa"]) == "[]"
+
+
+@pytest.mark.integration
+@pytest.mark.slow
+def test_runner_keeps_frames_when_configured_or_uploading_media(synthetic_video: Path, test_config):
+    for keep_via in ("flag", "include_media"):
+        cfg = test_config.model_copy(deep=True)
+        cfg.ocr.provider = "none"
+        if keep_via == "flag":
+            cfg.cleanup.frames_and_clips = False
+        else:
+            cfg.upload.include_media = True  # provider stays none: nothing is uploaded, media must survive
+        runner = PipelineRunner(cfg)
+        try:
+            item = classify_input(str(synthetic_video))
+            assert item is not None
+            registered = runner.register_inputs([item])
+            vid = registered[0][0]
+            res = runner.run_batch(registered)[0]
+            assert res.completed, res.error
+            paths = runner.paths
+            assert not paths.video_file(vid).exists() and not paths.audio_file(vid).exists()  # level media
+            assert any(paths.frames_dir(vid).rglob("*.jpg")) and paths.frames_file(vid).exists(), keep_via
+            assert paths.clips_dir(vid).exists(), keep_via
+            frame_rows = list(read_jsonl(cfg.export_dir / "per_video" / vid / "frames.jsonl"))
+            assert frame_rows and all((cfg.data_dir / r["frame_path"]).exists() for r in frame_rows)
+        finally:
+            runner.close()

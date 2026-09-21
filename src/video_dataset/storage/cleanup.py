@@ -81,13 +81,16 @@ def plan_video(paths: DataPaths, video_id: str) -> CleanupPlan:
 AFTER_EXPORT_LEVELS = ("none", "media", "all")
 
 
-def plan_after_export(paths: DataPaths, video_id: str, level: str) -> CleanupPlan:
+def plan_after_export(paths: DataPaths, video_id: str, level: str, frames_and_clips: bool = False) -> CleanupPlan:
     """What the runner deletes automatically once a video's EXPORT stage is DONE.
 
     * ``media``: the original download(s), the canonical video.mp4 and audio.wav.
     * ``all``:   additionally every working JSON (download metadata, scenes, audio events, transcript,
-                 OCR, annotations, QA, validated). Frames and clips (referenced by the exported records),
-                 the per-video export under final/per_video and the video log are always kept.
+                 OCR, annotations, QA, validated).
+    * ``frames_and_clips``: with either level, also the whole frames/<id>/ directory (the scene_NNN
+                 folders and frames.json) and clips/<id>/. The exported records still carry those paths.
+
+    The per-video export under final/per_video and the video log are always kept.
     """
     level = (level or "none").lower()
     if level not in AFTER_EXPORT_LEVELS:
@@ -95,6 +98,9 @@ def plan_after_export(paths: DataPaths, video_id: str, level: str) -> CleanupPla
     plan = CleanupPlan()
     if level == "none":
         return plan
+    if frames_and_clips:
+        plan.add(paths.frames_dir(video_id))
+        plan.add(paths.clips_dir(video_id))
     if level == "all":
         plan.add(paths.video_dir(video_id))  # source.*, video.mp4, metadata.json, media_info.json, download.json
     else:

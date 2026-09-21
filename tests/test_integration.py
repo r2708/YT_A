@@ -21,7 +21,9 @@ from video_dataset.utils.urls import classify_input
 @pytest.mark.integration
 @pytest.mark.slow
 def test_full_pipeline_on_synthetic_video(synthetic_video: Path, test_config):
-    runner = PipelineRunner(test_config)
+    cfg = test_config.model_copy(deep=True)
+    cfg.cleanup.frames_and_clips = False  # this test inspects the frame/clip artifacts after the run
+    runner = PipelineRunner(cfg)
     try:
         item = classify_input(str(synthetic_video))
         assert item is not None

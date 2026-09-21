@@ -336,23 +336,29 @@ class PipelineRunner:
         """Delete the working files a finished video no longer needs (cleanup.after_export).
 
         Runs every time a video ends a run in the `done` state and is idempotent: only paths that still
-        exist are planned. The per-video export under final/per_video, the frames and clips it references
-        and the log are never touched, so rebuilding the final dataset keeps this video's records.
+        exist are planned. The per-video export under final/per_video and the log are never touched, so
+        rebuilding the final dataset keeps this video's records. With cleanup.frames_and_clips (default)
+        the frames/<id>/scene_NNN folders and clips/<id>/ go too, unless upload.include_media needs them
+        for the shard; then the uploader removes them after the upload (upload.after_upload=delete).
         """
         from video_dataset.storage.cleanup import apply_plan, plan_after_export
 
         level = (self.config.cleanup.after_export or "none").lower()
         if level == "none":
             return
+        media = bool(self.config.cleanup.frames_and_clips)
+        if media and self.config.upload.include_media:
+            media = False
+            log.info("cleanup for %s keeps frames/clips: upload.include_media bundles them into the shard", video_id)
         try:
-            plan = plan_after_export(self.paths, video_id, level)
+            plan = plan_after_export(self.paths, video_id, level, frames_and_clips=media)
         except ValueError as exc:
             log.error("cleanup skipped for %s: %s", video_id, exc)
             return
         if not plan.paths:
             return
         removed, freed = apply_plan(plan)
-        msg = f"removed {removed} working file(s), freed {freed / 1e6:.1f} MB (cleanup.after_export={level})"
+        msg = f"removed {removed} working file(s), freed {freed / 1e6:.1f} MB (cleanup.after_export={level}, frames_and_clips={media})"
         self.db.log(video_id, "CLEANUP", "INFO", msg)
         log.info(stage_line("CLEANUP", video_id, msg, ok=True))
 

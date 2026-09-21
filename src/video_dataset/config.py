@@ -271,8 +271,12 @@ class CleanupConfig(_Section):
     after_export: str = "media"  # none | media | all
     # media: original download, canonical video.mp4 and audio.wav (the bulk); every JSON artifact stays
     #        so `--force-from VALIDATION` / `export --rerun` still work.
-    # all:   also transcript, OCR, annotations, QA, validated and download metadata; only the frames
-    #        and clips referenced by the dataset, the per-video export and the log remain.
+    # all:   also transcript, OCR, annotations, QA, validated and download metadata; only the
+    #        per-video export and the log remain.
+    frames_and_clips: bool = True  # with media/all: also delete frames/<id>/ (scene_NNN folders) and clips/<id>/
+    # The exported records keep their frame_path/clip_path values but the files are gone, so keep this
+    # false if you need the media locally. Ignored while upload.include_media is on: the media is
+    # bundled into the shard first and, with upload.after_upload=delete, removed after the upload.
 
 
 class PipelineStagesConfig(_Section):
