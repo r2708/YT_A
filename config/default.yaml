@@ -14,7 +14,10 @@ download:
   provider: yt_dlp
   max_resolution: 1080
   format: mp4
-  cookies_file: null       # only for videos you are authorized to access
+  cookies_file: null       # only for videos you are authorized to access (exported Netscape cookies.txt)
+  cookies_from_browser: null  # e.g. chrome, "chrome:Profile 1", firefox, edge - read cookies straight from the browser
+  cookies_optional: true   # true: if cookies cannot be loaded (Chrome locked / DPAPI on Windows, missing file)
+                           # log a warning and download without them; false: fail the video instead
   rate_limit: null         # e.g. "4M"
   retries: 3
   concurrency: 2

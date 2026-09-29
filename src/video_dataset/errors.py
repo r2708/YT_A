@@ -17,3 +17,7 @@ class VideoRejected(NonRetryableError):
 
 class InsufficientDiskSpace(NonRetryableError):
     """The data disk is below the configured free-space floor."""
+
+
+class PipelineBusy(RuntimeError):
+    """Another live pipeline process holds <data_dir>/run.lock; a second run would duplicate its work."""

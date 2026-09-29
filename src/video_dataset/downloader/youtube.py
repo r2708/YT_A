@@ -17,6 +17,34 @@ from video_dataset.utils.urls import InputItem
 
 log = get_logger("downloader.youtube")
 
+# Messages yt-dlp / its cookie extractor produce when the cookie source itself is broken (not the video).
+# On Windows, Chrome cookies fail in two ways when yt-dlp runs from a background process / IDE:
+#   * "Failed to decrypt with DPAPI" - the DPAPI key is only available to the user session / process
+#     context that encrypted the cookies, so every cookie decrypts to garbage;
+#   * "Could not copy Chrome cookie database" - Chrome holds an exclusive lock on its Cookies SQLite
+#     file while it is open.
+# Neither has anything to do with the video, so the download must continue without cookies.
+_COOKIE_FAILURE_MARKERS = (
+    "failed to load cookies",
+    "failed to decrypt with dpapi",
+    "could not copy chrome cookie database",
+    "could not copy",  # generic "could not copy <browser> cookie database"
+    "cookie database",
+    "cookies database",
+    "unsupported browser",
+    "unknown browser",
+    "unsupported keyring",
+    "could not find the cookies database",
+    "database is locked",
+    "cookies file",
+    "netscape format",
+    "invalid netscape",
+)
+
+# Browser cookie extraction is probed once per process per browser spec (the result cannot change
+# between videos, and re-extracting for every video would re-trigger the same DPAPI / lock errors).
+_BROWSER_COOKIE_PROBE: dict[tuple[Any, ...], bool] = {}
+
 _UNAVAILABLE_MARKERS = (
     "private video",
     "video unavailable",
@@ -49,6 +77,87 @@ class _QuietLogger:
 
     def error(self, msg: str) -> None:
         log.error("yt-dlp: %s", msg)
+
+
+class _CookieProbeLogger:
+    """Logger handed to yt-dlp's cookie extractor during the preflight probe. Errors are demoted to
+    debug because the probe's *outcome* is what gets reported (once), not every failed cookie row."""
+
+    def debug(self, msg: str, *a: Any, **k: Any) -> None:
+        log.debug("cookies: %s", msg)
+
+    def info(self, msg: str, *a: Any, **k: Any) -> None:
+        log.debug("cookies: %s", msg)
+
+    def warning(self, msg: str, *a: Any, **k: Any) -> None:
+        log.debug("cookies: %s", msg)
+
+    def error(self, msg: str, *a: Any, **k: Any) -> None:
+        log.debug("cookies: %s", msg)
+
+
+def parse_browser_spec(spec: Any) -> tuple[str, str | None, str | None, str | None] | None:
+    """Normalize a browser cookie spec into yt-dlp's (browser, profile, keyring, container) tuple.
+
+    Accepts the CLI string form ``BROWSER[+KEYRING][:PROFILE][::CONTAINER]`` (e.g. ``chrome``,
+    ``chrome:Profile 1``, ``firefox::personal``), or a list/tuple of 1-4 items as yt-dlp's Python API
+    expects. Returns None for an empty spec. A bare string is *not* passed through unchanged because
+    yt-dlp would unpack ``"chrome"`` character by character.
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, (list, tuple)):
+        items = [str(x) if x is not None else None for x in spec]
+        if not items or not items[0]:
+            return None
+        items = (items + [None, None, None])[:4]
+        return (str(items[0]).lower(), items[1] or None, items[2] or None, items[3] or None)
+    text = str(spec).strip()
+    if not text:
+        return None
+    container: str | None = None
+    if "::" in text:
+        text, container = text.split("::", 1)
+    profile: str | None = None
+    if ":" in text:
+        text, profile = text.split(":", 1)
+    keyring: str | None = None
+    if "+" in text:
+        text, keyring = text.split("+", 1)
+    return (text.strip().lower(), profile or None, (keyring or None) and keyring.upper(), container or None)
+
+
+def is_cookie_failure(exc: BaseException | str) -> bool:
+    """True when an error is about loading cookies rather than about the video."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _COOKIE_FAILURE_MARKERS)
+
+
+def probe_browser_cookies(spec: tuple[str, str | None, str | None, str | None]) -> tuple[bool, str]:
+    """Try to extract cookies from the browser once. Returns (ok, detail).
+
+    ``ok`` is False when yt-dlp raises (locked database, missing profile, unsupported browser) *or*
+    when the extraction yields no usable cookies (the Windows DPAPI case: every row fails to decrypt
+    and yt-dlp silently returns an empty jar, which would then cause bot-check failures anyway).
+    """
+    try:
+        from yt_dlp.cookies import extract_cookies_from_browser
+
+        browser, profile, keyring, container = spec
+        jar = extract_cookies_from_browser(browser, profile, _CookieProbeLogger(), keyring=keyring, container=container)
+    except Exception as exc:  # any failure here means "no browser cookies"
+        return False, f"{type(exc).__name__}: {exc}"
+    try:
+        count = len(jar)
+    except TypeError:  # pragma: no cover - defensive: unexpected jar type
+        count = 1
+    if count == 0:
+        return False, "browser returned 0 usable cookies (on Windows this usually means DPAPI decryption failed)"
+    return True, f"{count} cookies"
+
+
+def reset_cookie_probe_cache() -> None:
+    _BROWSER_COOKIE_PROBE.clear()
 
 
 def _parse_rate_limit(value: str | None) -> int | None:
@@ -125,13 +234,78 @@ class YouTubeDownloader:
             opts["ffmpeg_location"] = str(Path(find_ffmpeg(self.ffmpeg_path)).parent)
         except Exception as exc:  # pragma: no cover - ffmpeg checked earlier by `doctor`
             log.warning("ffmpeg not found (%s); yt-dlp will look for it on PATH and cannot merge streams without it", exc)
-        if self.config.cookies_file:
-            opts["cookiefile"] = str(Path(self.config.cookies_file).expanduser())
         rl = _parse_rate_limit(self.config.rate_limit)
         if rl:
             opts["ratelimit"] = rl
         opts.update(self.config.extra_args or {})
+        self._apply_cookie_options(opts)
         return opts
+
+    # -------------------------------------------------------------- cookies
+    def _cookies_optional(self) -> bool:
+        return bool(getattr(self.config, "cookies_optional", True))
+
+    def _apply_cookie_options(self, opts: dict[str, Any]) -> None:
+        """Attach cookie options that are known to work; drop the ones that cannot be loaded.
+
+        ``download.cookies_from_browser`` (or a raw ``cookiesfrombrowser`` in ``extra_args``) is probed
+        once per process. If the browser's cookies cannot be read - on Windows Chrome keeps its
+        cookie database locked and DPAPI refuses to decrypt for a background process - a warning is
+        logged and the download proceeds *without* cookies, because public videos do not need them.
+        Set ``download.cookies_optional: false`` to make that a hard error instead.
+        """
+        # --- cookies file --------------------------------------------------------------------
+        cookie_file = self.config.cookies_file or opts.pop("cookiefile", None)
+        if cookie_file:
+            path = Path(str(cookie_file)).expanduser()
+            if path.is_file():
+                opts["cookiefile"] = str(path)
+            else:
+                msg = f"download.cookies_file {path} does not exist or is not a file"
+                if not self._cookies_optional():
+                    raise FileNotFoundError(msg)
+                log.warning("%s; continuing without cookies (set download.cookies_optional: false to make this fatal)", msg)
+
+        # --- cookies from browser ------------------------------------------------------------
+        raw_spec = getattr(self.config, "cookies_from_browser", None) or opts.pop("cookiesfrombrowser", None)
+        opts.pop("cookiesfrombrowser", None)
+        try:
+            spec = parse_browser_spec(raw_spec)
+        except Exception as exc:
+            spec = None
+            log.warning("invalid download.cookies_from_browser %r (%s); continuing without browser cookies", raw_spec, exc)
+        if spec is None:
+            return
+
+        if spec not in _BROWSER_COOKIE_PROBE:
+            ok, detail = probe_browser_cookies(spec)
+            _BROWSER_COOKIE_PROBE[spec] = ok
+            if ok:
+                log.info("using cookies from %s (%s)", spec[0], detail)
+            else:
+                msg = f"could not load cookies from browser '{spec[0]}': {detail}"
+                if not self._cookies_optional():
+                    raise RuntimeError(msg)
+                log.warning(
+                    "%s. Continuing WITHOUT cookies - public videos still download; age-restricted / "
+                    "members-only ones will be recorded as unavailable. On Windows, close Chrome or export "
+                    "cookies to a file and set download.cookies_file instead.",
+                    msg,
+                )
+        if _BROWSER_COOKIE_PROBE[spec]:
+            opts["cookiesfrombrowser"] = spec
+        elif not self._cookies_optional():  # cached failure on a later video
+            raise RuntimeError(f"could not load cookies from browser '{spec[0]}'")
+
+    @staticmethod
+    def _strip_cookie_options(opts: dict[str, Any]) -> bool:
+        """Remove every cookie-related option. Returns True if anything was removed."""
+        removed = False
+        for key in ("cookiesfrombrowser", "cookiefile"):
+            if key in opts:
+                opts.pop(key, None)
+                removed = True
+        return removed
 
     # -------------------------------------------------------------- metadata
     @staticmethod
@@ -192,20 +366,34 @@ class YouTubeDownloader:
         if existing is None:
             opts["match_filter"] = _match_filter
 
+        def _extract() -> Any:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=True)
+
         def _run() -> dict[str, Any]:
             attempts["n"] += 1
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if info is None:
-                    raise RuntimeError("yt-dlp returned no info")
-                if "entries" in info:  # playlist guard
-                    entries = [e for e in info["entries"] if e]
-                    if not entries:
-                        raise VideoUnavailableError("playlist contained no downloadable entries")
-                    info = entries[0]
-                if rejected.get("reason"):
-                    raise VideoRejectedError(rejected["reason"])
-                return dict(info)
+            try:
+                info = _extract()
+            except Exception as exc:  # re-raised below unless it is a cookie problem
+                # Second line of defence: the preflight probe passed (or was bypassed) but yt-dlp
+                # still failed while loading cookies. Drop them and try again without.
+                if not (is_cookie_failure(exc) and self._cookies_optional() and self._strip_cookie_options(opts)):
+                    raise
+                log.warning(
+                    "yt-dlp could not load cookies (%s: %s); retrying %s without cookies",
+                    type(exc).__name__, str(exc)[:200], url,
+                )
+                info = _extract()
+            if info is None:
+                raise RuntimeError("yt-dlp returned no info")
+            if "entries" in info:  # playlist guard
+                entries = [e for e in info["entries"] if e]
+                if not entries:
+                    raise VideoUnavailableError("playlist contained no downloadable entries")
+                info = entries[0]
+            if rejected.get("reason"):
+                raise VideoRejectedError(rejected["reason"])
+            return dict(info)
 
         def _classify(exc: BaseException) -> None:
             msg = str(exc).lower()

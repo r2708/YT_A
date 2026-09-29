@@ -107,10 +107,17 @@ def _apply_local_options(config: str | None, set_: list[str] | None) -> None:
         state.config = None  # rebuild on next access
 
 
-def _runner():  # type: ignore[no-untyped-def]
+def _runner(recover: bool = True):  # type: ignore[no-untyped-def]
+    """recover=False for read-only commands (status / export / clean): they must never reset the
+    RUNNING stages of a batch that is alive in another terminal."""
+    from video_dataset.errors import PipelineBusy
     from video_dataset.pipeline.runner import PipelineRunner
 
-    return PipelineRunner(_config())
+    try:
+        return PipelineRunner(_config(), recover=recover)
+    except PipelineBusy as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(3) from None
 
 
 def _fmt_seconds(seconds: float | None) -> str:
@@ -362,7 +369,7 @@ def status(
 ) -> None:
     """Show per-video stage status (the checkpoint table); --watch keeps it refreshing."""
     _apply_local_options(config, set_)
-    runner = _runner()
+    runner = _runner(recover=False)
     try:
         if as_json:
             console.print_json(json.dumps(runner.status_rows(video_id), default=str))
@@ -428,7 +435,7 @@ def export(
     from video_dataset.dataset.stats import format_statistics
 
     _apply_local_options(config, set_)
-    runner = _runner()
+    runner = _runner(recover=False)
     try:
         if rerun:
             for v in runner.db.list_videos():
@@ -585,7 +592,7 @@ def clean(
     from video_dataset.storage import cleanup as cl
 
     _apply_local_options(config, set_)
-    runner = _runner()
+    runner = _runner(recover=False)
     try:
         paths = runner.paths
         if report:

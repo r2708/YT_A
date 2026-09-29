@@ -46,7 +46,9 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
     detections: list[OCRDetection] = []
     failures = 0
     n = 0
-    for frame in targets:
+    for i, frame in enumerate(targets, 1):
+        if i % 500 == 0:
+            log.info("OCR %d/%d frames (%d detections so far)", i, len(targets), len(detections))
         path = Path(frame.frame_path)
         if not path.exists():
             continue

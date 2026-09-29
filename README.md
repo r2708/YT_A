@@ -291,12 +291,12 @@ files under different ids are reported as duplicates in the download metrics.
 
 Layers, later wins: `config/default.yaml` -> `config/models.yaml` -> `config/pipeline.yaml` ->
 `--config my.yaml` -> environment (`VIDEO_DATASET_DATA_DIR`, `VIDEO_DATASET_DEVICE`,
-`VIDEO_DATASET_LOG_LEVEL`, `YT_DLP_COOKIES`) -> `--set key=value`.
+`VIDEO_DATASET_LOG_LEVEL`, `YT_DLP_COOKIES`, `YT_DLP_COOKIES_FROM_BROWSER`) -> `--set key=value`.
 
 The important knobs (see `config/default.yaml` for all of them with comments):
 
 ```yaml
-download:        { max_resolution: 1080, retries: 3, concurrency: 2, cookies_file: null }
+download:        { max_resolution: 1080, retries: 3, concurrency: 2, cookies_file: null, cookies_from_browser: null, cookies_optional: true }
 scene_detection: { detector: content, threshold: 27.0, fade_threshold: 12.0, min_scene_len_seconds: 0.6, max_scene_duration: 60.0 }
 frame_sampling:  { min_frames_per_scene: 3, max_frames_per_scene: 20, motion_aware: true, scene_boundary_frames: true,
                    analysis_fps: 4.0, change_threshold: 0.12, extract_clips: true, clip_codec: copy }
@@ -507,8 +507,12 @@ State lives in `data/state.db` (SQLite, WAL mode):
 * `stages` - `(video_id, stage) -> status, attempts, timing, error, artifact path, metrics, config hash`
 * `stage_log` - per-stage log lines; `file_hashes` - duplicate video detection
 
-Stages move `PENDING -> RUNNING -> DONE | FAILED | SKIPPED`. On start-up, stages left `RUNNING` by a
-killed process are marked `FAILED (interrupted)` and re-run. `DONE` stages are skipped unless
+Stages move `PENDING -> RUNNING -> DONE | FAILED | SKIPPED`. Commands that execute stages (`run`,
+`resume`, `process`, `download`, `retry-failed`, `validate`) take a pid lock at `data/run.lock`; on
+start-up, stages left `RUNNING` by a killed process are marked `FAILED (interrupted)` and re-run. A
+second run against the same data dir while the lock owner is alive exits with code 3 instead of
+duplicating its work; a stale lock from a dead pid is ignored. `status`, `export` and `clean` never
+take the lock and never reset a live run's stages. `DONE` stages are skipped unless
 `--force-from` is used; if a stage's config section changed since it ran, the status line says so.
 The VISION_ANALYSIS stage additionally checkpoints after every scene, so a long video interrupted
 half-way resumes at the next scene.
@@ -732,7 +736,8 @@ rm -rf data/frames/vid_XXXX data/clips/vid_XXXX      # same as clean vid_XXXX --
 | Symptom | Fix |
 |---|---|
 | `ffmpeg not found` | install FFmpeg or set `project.ffmpeg_path`; `video-dataset doctor` shows what is detected |
-| yt-dlp `Sign in to confirm you're not a bot` / 403 | update yt-dlp (`pip install -U yt-dlp`); for videos you are authorized to access, point `download.cookies_file` (or `YT_DLP_COOKIES`) at an exported cookies file |
+| yt-dlp `Sign in to confirm you're not a bot` / 403 | update yt-dlp (`pip install -U yt-dlp`); for videos you are authorized to access, point `download.cookies_file` (or `YT_DLP_COOKIES`) at an exported cookies file, or set `download.cookies_from_browser: chrome` |
+| `could not load cookies from browser 'chrome'` warning, `Failed to decrypt with DPAPI`, `Could not copy Chrome cookie database` (Windows) | Chrome locks its cookie database while it is open, and Windows DPAPI will not decrypt Chrome's cookies for a background process (IDE, script). The pipeline now logs the warning once and keeps downloading **without** cookies, so public videos are unaffected; only age-restricted / members-only videos become `UNAVAILABLE`. To actually use cookies on Windows: close Chrome completely, or export cookies with a browser extension (Netscape `cookies.txt`) and set `download.cookies_file`. Set `download.cookies_optional: false` if a missing cookie source must fail the run. |
 | `This video is unavailable` | recorded as `UNAVAILABLE`, the batch continues; check `video-dataset status VIDEO_ID` |
 | Only one scene detected | lower `scene_detection.threshold` (e.g. 20) or use `detector: adaptive`; long single shots are split at `max_scene_duration` |
 | Too many scenes (flashing content) | raise `threshold`, raise `min_scene_len_seconds` |

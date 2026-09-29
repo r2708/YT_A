@@ -21,7 +21,7 @@ from video_dataset.audio.stage import audio_stage
 from video_dataset.config import PipelineConfig
 from video_dataset.dataset.stage import export_stage
 from video_dataset.downloader.stage import download_stage
-from video_dataset.errors import NonRetryableError
+from video_dataset.errors import NonRetryableError, PipelineBusy
 from video_dataset.frame_sampling.stage import frame_extraction_stage
 from video_dataset.ocr.stage import ocr_stage
 from video_dataset.pipeline.context import StageOutput, VideoContext
@@ -36,6 +36,7 @@ from video_dataset.transcription.stage import transcription_stage
 from video_dataset.utils.disk import ensure_free_disk
 from video_dataset.utils.ids import make_video_id
 from video_dataset.utils.logging import get_logger, stage_line, video_log_file
+from video_dataset.utils.runlock import RunLock
 from video_dataset.utils.urls import InputItem, item_from_stored_url
 from video_dataset.validation.stage import validation_stage
 from video_dataset.vision.stage import vision_stage
@@ -114,15 +115,31 @@ ProgressFn = Callable[[ProgressEvent], None]
 
 
 class PipelineRunner:
-    def __init__(self, config: PipelineConfig, db: StateDB | None = None):
+    def __init__(self, config: PipelineConfig, db: StateDB | None = None, recover: bool = True):
+        """recover=True (commands that execute stages): take the run lock and turn stages left RUNNING
+        by a crashed process into FAILED so they re-run; raises PipelineBusy if a live process already
+        holds the lock. recover=False (status / export / clean): read the checkpoint table as it is,
+        never touching a live run's bookkeeping."""
         self.config = config
         self.paths = DataPaths(config.data_dir)
         self.paths.ensure_all()
         self.db = db or StateDB(config.db_path)
         self.models: dict[str, Any] = {}
-        recovered = self.db.recover_interrupted()
-        if recovered:
-            log.warning("%d stage(s) were interrupted by a previous run and will be retried", recovered)
+        self.lock = RunLock(self.paths.root)
+        self.lock_owner: int | None = None
+        if recover:
+            if self.lock.acquire():
+                recovered = self.db.recover_interrupted()
+                if recovered:
+                    log.warning("%d stage(s) were interrupted by a previous run and will be retried", recovered)
+            else:
+                self.lock_owner = self.lock.live_owner()
+                self.db.close()
+                raise PipelineBusy(
+                    f"another pipeline process (pid {self.lock_owner}) is already running against {self.paths.root}. "
+                    f"Wait for it, watch it with `video-dataset status --watch 5`, or stop it (kill {self.lock_owner}) "
+                    f"before starting a new run. A stale {self.lock.path.name} from a dead process is ignored automatically."
+                )
         self.stages = [Stage(s) for s in config.pipeline.stages]
 
     # ------------------------------------------------------------------ registration
@@ -442,6 +459,7 @@ class PipelineRunner:
 
     def close(self) -> None:
         self._release_models()
+        self.lock.release()
         self.db.close()
 
 

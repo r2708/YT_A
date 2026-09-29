@@ -38,6 +38,12 @@ class DownloadConfig(_Section):
     max_resolution: int = 1080
     format: str = "mp4"
     cookies_file: str | None = None
+    # Browser to read cookies from, yt-dlp style: "chrome", "chrome:Profile 1", "firefox", "edge", ...
+    # (or a list [browser, profile, keyring, container])
+    cookies_from_browser: str | list[str] | None = None
+    # True: if cookies cannot be loaded (locked Chrome DB / DPAPI on Windows, missing file), warn and
+    # download without them. False: treat that as a fatal error for every video.
+    cookies_optional: bool = True
     rate_limit: str | None = None
     retries: int = 3
     concurrency: int = 2
@@ -401,6 +407,7 @@ def _apply_env(data: dict[str, Any]) -> dict[str, Any]:
         "VIDEO_DATASET_LOG_LEVEL": "project.log_level",
         "VIDEO_DATASET_DB_PATH": "project.db_path",
         "YT_DLP_COOKIES": "download.cookies_file",
+        "YT_DLP_COOKIES_FROM_BROWSER": "download.cookies_from_browser",
     }
     overrides = {dotted: os.environ[var] for var, dotted in env_map.items() if os.environ.get(var)}
     return apply_dotted_overrides(data, overrides) if overrides else data
