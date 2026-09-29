@@ -45,6 +45,23 @@ STAGE_LABELS: dict[Stage, str] = {
 }
 
 
+# One-line "what is happening now" shown when a stage starts.
+STAGE_DESCRIPTIONS: dict[Stage, str] = {
+    Stage.DOWNLOAD: "downloading the source video with yt-dlp",
+    Stage.PREPROCESS: "probing the file, writing video.mp4 and extracting audio.wav with ffmpeg",
+    Stage.SCENE_DETECTION: "detecting scene cuts and fades (PySceneDetect, decodes the whole video)",
+    Stage.FRAME_EXTRACTION: "scanning motion, picking key frames and cutting per-scene clips",
+    Stage.AUDIO: "classifying non-speech audio events",
+    Stage.TRANSCRIPTION: "transcribing speech (whisper)",
+    Stage.OCR: "reading on-screen text from the sampled frames",
+    Stage.VISION_ANALYSIS: "describing every scene (vision analyzer)",
+    Stage.TEMPORAL_ANALYSIS: "building the event timeline and temporal relations",
+    Stage.QA_GENERATION: "generating temporal question/answer pairs",
+    Stage.VALIDATION: "validating and de-duplicating records",
+    Stage.EXPORT: "writing the per-video JSONL/Parquet export",
+}
+
+
 class StageStatus(str, Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"

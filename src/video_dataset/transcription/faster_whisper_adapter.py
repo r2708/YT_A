@@ -11,6 +11,7 @@ from video_dataset.schemas.transcript import Transcript, TranscriptSegment, Word
 from video_dataset.utils.device import resolve_device
 from video_dataset.utils.ids import segment_id
 from video_dataset.utils.logging import get_logger
+from video_dataset.utils.progress import ProgressLog, fmt_seconds
 
 log = get_logger("transcription.faster_whisper")
 
@@ -52,7 +53,14 @@ class FasterWhisperTranscriber:
         )
         segments: list[TranscriptSegment] = []
         n = 0
+        audio_len = float(getattr(info, "duration", 0.0) or 0.0)
+        log.info(
+            "transcribing %s of audio (language=%s, beam=%d, vad=%s)", fmt_seconds(audio_len) if audio_len else "?",
+            getattr(info, "language", None) or "auto", int(self.cfg.beam_size), bool(self.cfg.vad_filter),
+        )
+        progress = ProgressLog(log, "transcription", audio_len or None, unit="s", every_seconds=15)
         for seg in segments_iter:
+            progress.update(float(seg.end), extra=f"{n} segments")
             text = (seg.text or "").strip()
             if not text:
                 continue
@@ -77,6 +85,7 @@ class FasterWhisperTranscriber:
                     words=words,
                 )
             )
+        progress.finish(f"{n} segments")
         return Transcript(
             video_id=video_id,
             provider=self.name,

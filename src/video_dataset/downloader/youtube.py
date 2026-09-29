@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from video_dataset.schemas.video import DownloadStatus, SourceType, VideoMetadat
 from video_dataset.utils.disk import free_bytes
 from video_dataset.utils.ffmpeg import find_ffmpeg
 from video_dataset.utils.logging import get_logger
+from video_dataset.utils.progress import fmt_bytes, fmt_seconds
 from video_dataset.utils.retry import retry_call
 from video_dataset.utils.urls import InputItem
 
@@ -77,6 +79,43 @@ class _QuietLogger:
 
     def error(self, msg: str) -> None:
         log.error("yt-dlp: %s", msg)
+
+
+def make_progress_hooks(every_seconds: float = 5.0) -> tuple[Any, Any]:
+    """yt-dlp `progress_hooks` / `postprocessor_hooks` that print one INFO line every few seconds
+    (percent, size, speed, ETA) and announce the ffmpeg merge, so a long download is never silent."""
+    state = {"last": 0.0, "streams": 0}
+
+    def on_progress(d: dict[str, Any]) -> None:
+        status = d.get("status")
+        if status == "downloading":
+            now = time.time()
+            if now - state["last"] < every_seconds:
+                return
+            state["last"] = now
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            done = float(d.get("downloaded_bytes") or 0)
+            pct = f"{done / float(total) * 100:.0f}%" if total else "?%"
+            fmt_id = (d.get("info_dict") or {}).get("format_id") or ""
+            log.info(
+                "downloading %s of %s (%s/s, eta %s)%s", pct, fmt_bytes(total), fmt_bytes(d.get("speed")),
+                fmt_seconds(d.get("eta")), f" stream {fmt_id}" if fmt_id else "",
+            )
+        elif status == "finished":
+            state["streams"] += 1
+            state["last"] = 0.0
+            size = d.get("total_bytes") or d.get("downloaded_bytes")
+            log.info("stream %d finished: %s (%s)", state["streams"], Path(d.get("filename") or "").name, fmt_bytes(size))
+        elif status == "error":
+            log.warning("yt-dlp reported a download error for %s", Path(d.get("filename") or "").name)
+
+    def on_postprocess(d: dict[str, Any]) -> None:
+        pp = d.get("postprocessor") or ""
+        if d.get("status") == "started" and pp in ("Merger", "FFmpegMerger", "MoveFiles", "FFmpegVideoRemuxer", "FFmpegVideoConvertor"):
+            what = "merging video+audio streams with ffmpeg" if "Merger" in pp else pp
+            log.info("post-processing: %s", what)
+
+    return on_progress, on_postprocess
 
 
 class _CookieProbeLogger:
@@ -230,6 +269,9 @@ class YouTubeDownloader:
             "getcomments": False,
             "logger": _QuietLogger(),
         }
+        on_progress, on_postprocess = make_progress_hooks()
+        opts["progress_hooks"] = [on_progress]
+        opts["postprocessor_hooks"] = [on_postprocess]
         try:
             opts["ffmpeg_location"] = str(Path(find_ffmpeg(self.ffmpeg_path)).parent)
         except Exception as exc:  # pragma: no cover - ffmpeg checked earlier by `doctor`
@@ -350,6 +392,10 @@ class YouTubeDownloader:
         opts = self.build_options(dest_dir)
         if existing is not None:
             opts["skip_download"] = True  # still refresh metadata cheaply
+            log.info("%s already downloaded (%s, %s); refreshing metadata only", video_id, existing.name, fmt_bytes(existing.stat().st_size))
+        else:
+            log.info("fetching metadata and best <=%dp streams for %s", int(self.config.max_resolution), url)
+        t_fetch = time.time()
 
         attempts = {"n": 0}
         rejected: dict[str, str] = {}
@@ -427,6 +473,11 @@ class YouTubeDownloader:
             return FetchResult(DownloadStatus.FAILED, None, None, error="download finished but no media file found", attempts=attempts["n"])
         metadata = self.metadata_from_info(info, video_id, url, path)
         status = DownloadStatus.SKIPPED_EXISTING if existing is not None else DownloadStatus.DONE
+        log.info(
+            "%s: '%s' (%s, %s) -> %s (%s) in %s", "reused" if existing is not None else "downloaded",
+            (metadata.title or "")[:80], fmt_seconds(metadata.duration), f"{metadata.width}x{metadata.height}" if metadata.width else "?",
+            path.name, fmt_bytes(path.stat().st_size), fmt_seconds(time.time() - t_fetch),
+        )
         return FetchResult(status, path, metadata, attempts=attempts["n"])
 
     @staticmethod

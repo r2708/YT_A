@@ -8,6 +8,7 @@ from video_dataset.preprocessing.normalize import ensure_canonical_video, extrac
 from video_dataset.preprocessing.probe import probe_media
 from video_dataset.stages import Stage
 from video_dataset.utils.io import write_json_atomic
+from video_dataset.utils.progress import fmt_seconds
 
 
 def preprocess_stage(ctx: VideoContext) -> StageOutput:
@@ -19,7 +20,9 @@ def preprocess_stage(ctx: VideoContext) -> StageOutput:
         raise FileNotFoundError(f"no downloaded source for {ctx.video_id}")
     source = sources[0] if sources else canonical
 
+    log.info("probing %s", source.name)
     src_info = probe_media(source, cfg.project.ffprobe_path)
+    log.info("source: %dx%d @ %.2f fps, %s, codec=%s, audio=%s", src_info.width, src_info.height, src_info.fps, fmt_seconds(src_info.duration), src_info.video_codec, "yes" if src_info.has_audio else "no")
     max_dur = cfg.limits.max_duration_seconds
     if max_dur and src_info.duration > float(max_dur):
         raise VideoRejected(
@@ -35,6 +38,7 @@ def preprocess_stage(ctx: VideoContext) -> StageOutput:
     has_audio = False
     wav = ctx.paths.audio_file(ctx.video_id)
     if src_info.has_audio or not info.video_codec:  # unknown -> try
+        log.info("extracting audio -> %s (%d Hz, %d ch)", wav.name, cfg.preprocess.audio_sample_rate, cfg.preprocess.audio_channels)
         has_audio = extract_audio(video_path, wav, cfg.preprocess.audio_sample_rate, cfg.preprocess.audio_channels, cfg.project.ffmpeg_path)
     if not has_audio:
         log.info("no audio stream; transcription will be skipped")

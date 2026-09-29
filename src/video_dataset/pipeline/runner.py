@@ -28,7 +28,14 @@ from video_dataset.pipeline.context import StageOutput, VideoContext
 from video_dataset.preprocessing.stage import preprocess_stage
 from video_dataset.questions.stage import qa_stage
 from video_dataset.scene_detection.stage import scene_detection_stage
-from video_dataset.stages import MODEL_STAGES, STAGE_LABELS, STAGE_ORDER, Stage, StageStatus
+from video_dataset.stages import (
+    MODEL_STAGES,
+    STAGE_DESCRIPTIONS,
+    STAGE_LABELS,
+    STAGE_ORDER,
+    Stage,
+    StageStatus,
+)
 from video_dataset.storage.paths import DataPaths
 from video_dataset.storage.state_db import StateDB
 from video_dataset.temporal.stage import temporal_stage
@@ -36,6 +43,7 @@ from video_dataset.transcription.stage import transcription_stage
 from video_dataset.utils.disk import ensure_free_disk
 from video_dataset.utils.ids import make_video_id
 from video_dataset.utils.logging import get_logger, stage_line, video_log_file
+from video_dataset.utils.progress import fmt_seconds
 from video_dataset.utils.runlock import RunLock
 from video_dataset.utils.urls import InputItem, item_from_stored_url
 from video_dataset.validation.stage import validation_stage
@@ -198,6 +206,10 @@ class PipelineRunner:
             attempt += 1
             self.db.start_stage(ctx.video_id, stage)
             t0 = time.time()
+            what = STAGE_DESCRIPTIONS.get(stage, "running")
+            if attempt > 1:
+                what = f"retry {attempt}/{retries + 1}: {what}"
+            log.info(stage_line(label, ctx.video_id, f"started - {what}", ok=None))
             try:
                 if stage.value in set(self.config.limits.disk_check_stages or []):
                     ensure_free_disk(self.paths.root, self.config.limits.min_free_disk_gb, label=stage.value)
@@ -243,6 +255,10 @@ class PipelineRunner:
         ctx = self.context(video_id, item)
         t_video = time.time()
         with video_log_file(video_id, self.paths.logs_dir):
+            if stages:
+                source = item.raw if item is not None else (self.db.get_video(video_id) or {}).get("url") or ""
+                span = STAGE_LABELS[stages[0]] if len(stages) == 1 else f"{STAGE_LABELS[stages[0]]} -> {STAGE_LABELS[stages[-1]]}"
+                log.info("=== %s: %d stage(s) %s%s", video_id, len(stages), span, f"  [{source}]" if source else "")
             for stage in stages:
                 force = force_from is not None and STAGE_ORDER.index(stage) >= STAGE_ORDER.index(force_from)
                 status, executed = self.run_stage(ctx, stage, force=force)
@@ -267,7 +283,14 @@ class PipelineRunner:
                 self._cleanup_after_export(video_id)
             elif result.completed:
                 self.db.set_video_status(video_id, "processing")
-        result.seconds = time.time() - t_video
+            result.seconds = time.time() - t_video
+            if result.completed:
+                log.info(
+                    "=== %s finished in %s (%d run, %d cached, %d skipped)", video_id, fmt_seconds(result.seconds),
+                    len(result.stages_run), len(result.stages_cached), len(result.stages_skipped),
+                )
+            else:
+                log.error("=== %s FAILED at %s after %s: %s", video_id, STAGE_LABELS.get(result.failed_stage, result.failed_stage), fmt_seconds(result.seconds), (result.error or "")[:200])
         return result
 
     # ------------------------------------------------------------------ batch
@@ -303,6 +326,12 @@ class PipelineRunner:
             for vid, _ in registered:
                 self.db.reset_stages(vid, force_from)
 
+        log.info(
+            "batch: %d video(s); phase 1 = %s (%d worker%s), phase 2 = %s (models load once, sequential)",
+            len(registered),
+            " ".join(STAGE_LABELS[s] for s in cpu_stages) or "-", workers, "s" if workers != 1 else "",
+            " ".join(STAGE_LABELS[s] for s in rest) or "-",
+        )
         # Phase A: download .. audio, parallel across videos
         if cpu_stages:
             if workers > 1 and len(registered) > 1:
@@ -320,6 +349,8 @@ class PipelineRunner:
         # Phase B: model stages, sequential (models load once)
         counter["done"] = 0
         pending = [(vid, item) for vid, item in registered if results.get(vid) is None or results[vid].completed]
+        if rest and pending:
+            log.info("batch: phase 2 (%s) for %d video(s)", " ".join(STAGE_LABELS[s] for s in rest), len(pending))
         if rest and (self.config.pipeline.model_stages_sequential or workers == 1):
             for vid, item in pending:
                 prev = results.get(vid)
@@ -347,6 +378,7 @@ class PipelineRunner:
 
         ordered = [results[vid] for vid, _ in registered if vid in results]
         self._release_models()
+        log.info("batch: finished %d video(s) in %s, %d failed", len(ordered), fmt_seconds(time.time() - t_batch), sum(1 for r in ordered if not r.completed))
         return ordered
 
     def _cleanup_after_export(self, video_id: str) -> None:

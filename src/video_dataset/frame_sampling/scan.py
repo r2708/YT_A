@@ -86,6 +86,7 @@ def scan_video(
     scans: dict[str, SceneScan] = {s.scene_id: SceneScan(scene_id=s.scene_id, analysis_width=w, analysis_fps=afps) for s in scenes}
     rx, ry = _radial_unit_vectors(h, w)
 
+    log.info("motion scan: decoding %s at %dx%d, %.1f fps for %d scenes (~%d frames)", video_path.name, w, h, afps, len(scenes), int(info.duration * afps))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=frame_bytes * 8)
     assert proc.stdout is not None
     n = 0

@@ -19,6 +19,7 @@ from video_dataset.schemas.scene import Clip, Frame, Scene
 from video_dataset.utils.ffmpeg import ffprobe_json, run_ffmpeg
 from video_dataset.utils.ids import clip_id as make_clip_id
 from video_dataset.utils.logging import get_logger
+from video_dataset.utils.progress import ProgressLog
 
 log = get_logger("frame_sampling.clips")
 
@@ -105,8 +106,11 @@ def extract_clips(
     max_len = float(cfg.clip_max_duration or 0) or float("inf")
     stats = ClipStats()
     clips: list[Clip] = []
+    log.info("cutting clips for %d scenes -> %s (codec=%s, max %.0fs each)", len(scenes), out_dir, codec, max_len if max_len != float("inf") else 0)
+    progress = ProgressLog(log, "clip extraction", len(scenes), unit="scenes", every_seconds=10)
 
-    for scene in scenes:
+    for si, scene in enumerate(scenes, 1):
+        progress.update(si - 1, extra=f"{stats.total} clips, {stats.reencoded} re-encoded")
         n_parts = max(1, int(scene.duration // max_len) + (1 if scene.duration % max_len > 0.5 else 0)) if scene.duration > max_len else 1
         part_len = scene.duration / n_parts
         for part in range(n_parts):
@@ -174,4 +178,5 @@ def extract_clips(
             "%d of %d clips are off by more than %.2fs (worst %.2fs); use frame_sampling.clip_codec=auto or libx264 for exact cuts",
             stats.inexact, stats.total, tolerance, stats.worst_error_seconds,
         )
+    progress.finish(f"{stats.total} clips")
     return clips, stats

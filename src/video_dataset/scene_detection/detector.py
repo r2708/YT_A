@@ -7,13 +7,14 @@ but those splits are explicitly marked `TransitionType.SPLIT` so nothing downstr
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from video_dataset.config import SceneDetectionConfig
 from video_dataset.schemas.scene import Scene, SceneDetectionResult, TransitionType
 from video_dataset.schemas.video import MediaInfo
 from video_dataset.utils.ids import scene_id as make_scene_id
 from video_dataset.utils.logging import get_logger
+from video_dataset.utils.progress import ProgressLog
 
 log = get_logger("scene_detection")
 
@@ -57,7 +58,24 @@ class PySceneDetector:
             manager.auto_downscale = False
             manager.downscale = int(cfg.downscale)
 
-        manager.detect_scenes(video=video, frame_skip=int(cfg.frame_skip or 0), show_progress=False)
+        total_frames_est = int(info.frame_count) if info.frame_count else int(round(info.duration * fps))
+        log.info(
+            "scanning %d frames (%s detector%s, frame_skip=%d, downscale=%s)",
+            total_frames_est, cfg.detector, " + fades" if cfg.detect_fades and cfg.detector != "threshold" else "",
+            int(cfg.frame_skip or 0), cfg.downscale or "auto",
+        )
+        progress = ProgressLog(log, "scene scan", total_frames_est, unit="frames", every_seconds=15)
+        cuts = {"n": 0}
+
+        def _on_cut(_image: Any, timecode: Any) -> None:  # PySceneDetect passes a FrameTimecode
+            cuts["n"] += 1
+            fn = getattr(timecode, "frame_num", None)
+            if fn is None:
+                fn = timecode.get_frames() if hasattr(timecode, "get_frames") else int(timecode)
+            progress.update(int(fn), extra=f"{cuts['n']} cuts so far")
+
+        manager.detect_scenes(video=video, frame_skip=int(cfg.frame_skip or 0), show_progress=False, callback=_on_cut)
+        progress.finish(f"{cuts['n']} cuts")
         raw = manager.get_scene_list(start_in_scene=True)
 
         boundaries: list[tuple[int, int]] = []

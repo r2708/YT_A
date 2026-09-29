@@ -172,7 +172,9 @@ def _maybe_upload(cfg: PipelineConfig, force: bool = False, dry_run: bool = Fals
     from video_dataset.dataset.upload import UploadError, check_and_upload
 
     if (cfg.upload.provider or "none").lower() == "none" and not force:
+        console.print("[dim]upload.provider is 'none' - nothing is pushed to the Hugging Face Hub (see config upload:)[/dim]")
         return False
+    console.print(f"[bold]Checking upload shard against {cfg.upload.threshold_mb:.0f} MB threshold for {cfg.upload.repo_id or '-'} ...[/bold]")
     try:
         summary = check_and_upload(cfg, force=force, dry_run=dry_run)
     except UploadError as exc:
@@ -256,6 +258,7 @@ def run(
         )
         _print_results(results, elapsed=time.time() - t0)
         if not no_aggregate and (until is None or parse_stage(until) == Stage.EXPORT):
+            console.print(f"[bold]Merging per-video exports into {runner.config.export_dir} ...[/bold]")
             stats = aggregate_exports(runner.config, runner.db)
             console.print(f"Final dataset written to {runner.config.export_dir} ({stats['temporal_qa']} temporal QA, {stats['long_video_qa']} long-video QA)")
             _maybe_upload(runner.config)
@@ -294,6 +297,7 @@ def resume(
         )
         _print_results(results, elapsed=time.time() - t0)
         if not no_aggregate and (until is None or parse_stage(until) == Stage.EXPORT):
+            console.print(f"[bold]Merging per-video exports into {runner.config.export_dir} ...[/bold]")
             stats = aggregate_exports(runner.config, runner.db)
             console.print(f"Final dataset written to {runner.config.export_dir} ({stats['temporal_qa']} temporal QA, {stats['long_video_qa']} long-video QA)")
             _maybe_upload(runner.config)

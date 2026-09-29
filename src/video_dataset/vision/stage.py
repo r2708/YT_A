@@ -21,6 +21,7 @@ from video_dataset.schemas.vision import (
 from video_dataset.stages import Stage
 from video_dataset.utils.device import empty_cache, is_oom_error, resolve_device
 from video_dataset.utils.io import read_json, write_json_atomic
+from video_dataset.utils.progress import ProgressLog
 from video_dataset.vision.base import AnalysisContext, create_vision_analyzer, select_evenly
 from video_dataset.vision.enrichers.base import create_enrichers
 from video_dataset.vision.heuristic import HeuristicVisionAnalyzer
@@ -57,7 +58,11 @@ def vision_stage(ctx: VideoContext) -> StageOutput:
     scans = {s.scene_id: s for s in sampling.scans}
     clips = {c.scene_id: c for c in sampling.clips}
 
-    analyzer = ctx.get_model(f"vision:{vcfg.provider}:{vcfg.model}", lambda: create_vision_analyzer(vcfg, device))
+    def _load_analyzer():  # type: ignore[no-untyped-def]
+        log.info("loading vision analyzer '%s'%s on %s (first use in this process)", vcfg.provider, f" model={vcfg.model}" if vcfg.model else "", device)
+        return create_vision_analyzer(vcfg, device)
+
+    analyzer = ctx.get_model(f"vision:{vcfg.provider}:{vcfg.model}", _load_analyzer)
     heuristic = HeuristicVisionAnalyzer(cfg.temporal.min_camera_motion, cfg.temporal.min_camera_consistency)
     enrichers = ctx.get_model(f"enrichers:{','.join(vcfg.enrichers)}", lambda: create_enrichers(vcfg, device)) if vcfg.enrichers else []
 
@@ -77,7 +82,14 @@ def vision_stage(ctx: VideoContext) -> StageOutput:
     previous_summary: str | None = None
     failures = 0
     verified = 0
-    for scene in scenes:
+    log.info(
+        "analyzing %d scenes with %s%s on %s (%d already done%s)", len(scenes), analyzer.name,
+        f" ({analyzer.model})" if getattr(analyzer, "model", None) else "", device, len(done),
+        f", enrichers: {', '.join(e.name for e in enrichers)}" if enrichers else "",
+    )
+    progress = ProgressLog(log, "vision", len(scenes), unit="scenes", every_seconds=15)
+    for si, scene in enumerate(scenes, 1):
+        progress.update(si - 1, extra=f"{failures} failed" if failures else "")
         frames = sorted(frames_by_scene.get(scene.scene_id, []), key=lambda f: f.timestamp)
         if scene.scene_id in done:
             results.append(done[scene.scene_id])
@@ -158,6 +170,7 @@ def vision_stage(ctx: VideoContext) -> StageOutput:
         write_json_atomic(out_path, VisionResult(video_id=ctx.video_id, provider=analyzer.name, model=analyzer.model, scenes=results))
 
     result = VisionResult(video_id=ctx.video_id, provider=analyzer.name, model=analyzer.model, scenes=results)
+    progress.finish(f"{failures} failed" if failures else "")
     write_json_atomic(out_path, result)
     n_objects = sum(len(s.objects) for s in results)
     n_actions = sum(len(s.actions) for s in results)

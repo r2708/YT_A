@@ -12,6 +12,7 @@ from video_dataset.schemas.scene import Frame, Scene
 from video_dataset.utils.ffmpeg import run_ffmpeg
 from video_dataset.utils.ids import frame_id as make_frame_id
 from video_dataset.utils.logging import get_logger
+from video_dataset.utils.progress import ProgressLog
 
 log = get_logger("frame_sampling.extract")
 
@@ -53,8 +54,11 @@ class FrameExtractor:
             raise RuntimeError(f"cannot open {self.video_path}")
         frames: list[Frame] = []
         pos = 0  # index of the next frame cap.read() would return
+        log.info("extracting %d frames from %d scenes -> %s", len(requests), len(plan), out_root)
+        progress = ProgressLog(log, "frame extraction", len(requests), unit="frames", every_seconds=10)
         try:
-            for scene, cand, k in requests:
+            for i, (scene, cand, k) in enumerate(requests, 1):
+                progress.update(i - 1, extra=f"scene {scene.index}")
                 target = cand.frame_index
                 if target < pos or target - pos > 120:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, target)
@@ -101,5 +105,6 @@ class FrameExtractor:
                 )
         finally:
             cap.release()
+        progress.finish(f"{len(frames)} frames written")
         frames.sort(key=lambda f: (f.timestamp, f.frame_id))
         return frames

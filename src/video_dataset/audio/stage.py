@@ -26,10 +26,14 @@ def audio_stage(ctx: VideoContext) -> StageOutput:
         return StageOutput(artifact_path=str(out), metrics={"has_audio": False, "events": 0}, message="no audio stream", skipped=False)
 
     _sr, _ch, duration = wav_info(wav)
-    detector = ctx.get_model(
-        f"audio_events:{cfg.audio_events.provider}:{cfg.audio_events.model}",
-        lambda: create_audio_event_detector(cfg.audio_events, resolve_device(cfg.project.device)),
-    )
+
+    def _load_detector():  # type: ignore[no-untyped-def]
+        log.info("loading audio event detector '%s' (first use in this process)", cfg.audio_events.provider)
+        return create_audio_event_detector(cfg.audio_events, resolve_device(cfg.project.device))
+
+    detector = ctx.get_model(f"audio_events:{cfg.audio_events.provider}:{cfg.audio_events.model}", _load_detector)
+    if cfg.audio_events.enabled:
+        log.info("classifying sound events over %.0fs of audio with %s", duration, cfg.audio_events.provider)
     events = detector.detect(wav) if cfg.audio_events.enabled else []
     analysis = AudioAnalysis(
         video_id=ctx.video_id,

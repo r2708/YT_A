@@ -12,6 +12,7 @@ from video_dataset.schemas.scene import Frame, FrameSamplingResult
 from video_dataset.stages import Stage
 from video_dataset.utils.device import resolve_device
 from video_dataset.utils.io import read_json, write_json_atomic
+from video_dataset.utils.progress import ProgressLog
 
 
 def pick_frames_for_ocr(frames: list[Frame], max_per_scene: int) -> list[Frame]:
@@ -36,7 +37,11 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
     cfg = ctx.config.ocr
     out = ctx.paths.ocr_file(ctx.video_id)
     frames = FrameSamplingResult.model_validate(read_json(ctx.paths.frames_file(ctx.video_id))).frames
-    engine = ctx.get_model(f"ocr:{cfg.provider}", lambda: create_ocr_engine(cfg, resolve_device(ctx.config.project.device)))
+    def _load_engine():  # type: ignore[no-untyped-def]
+        log.info("loading OCR engine '%s' (first use in this process)", cfg.provider)
+        return create_ocr_engine(cfg, resolve_device(ctx.config.project.device))
+
+    engine = ctx.get_model(f"ocr:{cfg.provider}", _load_engine)
     if engine is None:
         result = OCRResult(video_id=ctx.video_id, engine="none", frames_processed=0)
         write_json_atomic(out, result)
@@ -46,9 +51,10 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
     detections: list[OCRDetection] = []
     failures = 0
     n = 0
+    log.info("running %s on %d of %d frames (max %d per scene)", getattr(engine, "name", cfg.provider), len(targets), len(frames), cfg.max_frames_per_scene)
+    progress = ProgressLog(log, "OCR", len(targets), unit="frames", every_seconds=15)
     for i, frame in enumerate(targets, 1):
-        if i % 500 == 0:
-            log.info("OCR %d/%d frames (%d detections so far)", i, len(targets), len(detections))
+        progress.update(i - 1, extra=f"{len(detections)} detections")
         path = Path(frame.frame_path)
         if not path.exists():
             continue
@@ -76,6 +82,7 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
                 )
             )
     tracks = merge_detections(detections, cfg.merge_similarity, cfg.merge_max_gap_seconds)
+    progress.finish(f"{len(detections)} detections")
     total_scenes = len({f.scene_id for f in frames})
     tracks, overlays = classify_tracks(tracks, total_scenes, cfg.static_overlay_min_scene_fraction, cfg.static_overlay_min_scenes, cfg.merge_max_gap_seconds)
     n_overlay = sum(1 for t in tracks if t.is_static_overlay)
