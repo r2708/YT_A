@@ -148,7 +148,10 @@ class OCRConfig(_Section):
 
 
 class VisionConfig(_Section):
-    provider: str = "heuristic"  # heuristic | hf | anthropic | openai_compatible | mock
+    provider: str = "heuristic"  # heuristic | cv_models | hf | anthropic | openai_compatible | mock
+    yolo_model: str = "yolov8n.pt"  # YOLO model for cv_models provider (n/s/m/l/x)
+    yolo_confidence: float = 0.5  # Minimum confidence for YOLO detections
+    yolo_max_frames: int = 8  # frames per scene sent to YOLO / CLIP (evenly spaced); bounds memory on small machines
     preset: str | None = None
     model: str | None = None
     base_url: str | None = None
@@ -221,6 +224,9 @@ class QAConfig(_Section):
     allow_unscored_evidence: bool = True  # events with confidence=None may be used (flagged for review)
     paraphrase: bool = False
     include_speech_in_answers: bool = True
+    generator: str = "template"  # template | spacy | both - question generation method
+    spacy_model: str = "en_core_web_sm"  # spaCy pipeline for generator=spacy/both (python -m spacy download en_core_web_sm)
+    spacy_max_per_event: int = 3  # spaCy questions kept per event before the per-video target applies
 
 
 class ValidationConfig(_Section):

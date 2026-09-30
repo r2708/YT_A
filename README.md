@@ -166,7 +166,7 @@ replaced by changing config, not code:
 
 | Interface | Implementations | Config key |
 |---|---|---|
-| `VisionAnalyzer` (`analyze_frame`, `analyze_scene`, `analyze_clip`, `verify`) | `heuristic` (measurement only), `hf` (any transformers image-text-to-text model: SmolVLM2, Qwen2-VL/2.5-VL, LLaVA-OneVision…), `anthropic` (Claude), `openai_compatible` (vLLM, Ollama, LM Studio, OpenAI), `mock` | `vision.provider` |
+| `VisionAnalyzer` (`analyze_frame`, `analyze_scene`, `analyze_clip`, `verify`) | `heuristic` (measurement only), `cv_models` (YOLO object detection + CLIP zero-shot attributes, not generative), `hf` (any transformers image-text-to-text model: SmolVLM2, Qwen2-VL/2.5-VL, LLaVA-OneVision…), `anthropic` (Claude), `openai_compatible` (vLLM, Ollama, LM Studio, OpenAI), `mock` | `vision.provider` |
 | `Transcriber` | `faster_whisper`, `transformers`, `mock`, `none` | `transcription.provider` |
 | `OCREngine` | `rapidocr`, `easyocr`, `paddleocr`, `mock`, `none` | `ocr.provider` |
 | `AudioEventDetector` | `energy` (never guesses a sound type), `transformers` (AudioSet classifier), `none` | `audio_events.provider` |
@@ -175,6 +175,7 @@ replaced by changing config, not code:
 | `LLMClient` (text + images) | `anthropic`, `openai_compatible`, `mock` | `llm.provider`, used by `qa.paraphrase`, `temporal.causal_inference` |
 | `CausalInferencer` | `none` (default), `llm` | `temporal.causal_inference` |
 | Enrichers | `clip` zero-shot attribute scores | `vision.enrichers` |
+| `QAGenerator` (`generate`) | `template` (temporal templates, all eight categories), `spacy` (dependency-parsed subject / verb / object / location questions per event + NER on speech and on-screen text), `both` (merged, deduplicated) | `qa.generator` |
 
 ---
 
@@ -239,6 +240,10 @@ video-dataset run urls.txt --set transcription.preset=mps            # transform
 video-dataset run urls.txt --set audio_events.provider=transformers
 # CLIP zero-shot enrichment (indoor/outdoor, day/night, shot type, people present)
 video-dataset run urls.txt --set vision.enrichers='[clip]'
+# YOLO object detection + CLIP attributes without a generative VLM (pip install -e ".[vision-cv]")
+video-dataset run urls.txt --set vision.provider=cv_models --set vision.yolo_model=yolov8n.pt
+# spaCy-parsed questions on top of the templates (pip install -e ".[qa-spacy]" && python -m spacy download en_core_web_sm)
+video-dataset run urls.txt --set qa.generator=both
 ```
 
 The default vision provider is `heuristic`: it needs no model and only reports **measured** facts
@@ -867,6 +872,8 @@ Fully implemented and tested offline:
 * chunked audio analysis (energy / silence), faster-whisper + transformers ASR adapters with derived confidence
 * RapidOCR / EasyOCR / PaddleOCR adapters and cross-frame text tracking
 * heuristic (measurement-only) vision analyzer with camera-motion labelling and claim verification
+* `cv_models` vision analyzer: YOLO objects (count, mean detector score, coarse frame position) + CLIP setting / time of day / shot type / aerial labels on top of the measured signals (fake models in the tests)
+* spaCy question generator (`qa.generator: spacy | both`): subject / predicate / object / location questions per event, named-entity questions for speech and on-screen text, same evidence and confidence rules as the templates
 * event extraction from every modality, interval-algebra relations (+ CONTINUES / INTERRUPTS / CHANGES_TO rules), timeline
 * template-based temporal QA for all eight categories with evidence and derived confidence
 * validation, grounding, quality scores, evidence-aware deduplication, JSONL + Parquet export, statistics
@@ -875,7 +882,7 @@ Fully implemented and tested offline:
 Implemented but dependent on an external model/API/network (exercised only via mocks in the test suite):
 
 * `vision.provider: hf` (local transformers VLMs), `anthropic`, `openai_compatible` - real generative descriptions, objects, people, actions, camera and style, plus model verification
-* `audio_events.provider: transformers` (AudioSet classifier), `vision.enrichers: [clip]`
+* `audio_events.provider: transformers` (AudioSet classifier), `vision.enrichers: [clip]`, `vision.provider: cv_models` (downloads the YOLO weights and the CLIP model on first use)
 * `qa.paraphrase` and `temporal.causal_inference: llm` (need `llm.provider`)
 * `transcription.provider: faster_whisper` downloads its model on first use (verified in the sample run: the `base` model ran on CPU int8; the sample video has no dialogue, so 0 segments was the correct result)
 

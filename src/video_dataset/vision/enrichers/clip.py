@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from video_dataset.schemas.scene import Frame, Scene
+from video_dataset.schemas.vision import CameraAngle, SceneAnalysis, Setting, ShotType
 from video_dataset.utils.device import torch_dtype
 from video_dataset.vision.base import select_evenly
 
@@ -68,3 +69,49 @@ class CLIPZeroShotEnricher:
             best = max(range(len(names)), key=lambda i: probs[i])
             out["attributes"][key] = {"label": names[best], "score": round(float(probs[best]), 4), "scores": {n: round(float(p), 4) for n, p in zip(names, probs)}}
         return out
+
+
+def _confident(enrichment: dict[str, Any] | None, key: str, min_score: float) -> str | None:
+    attrs = (enrichment or {}).get("attributes") or {}
+    item = attrs.get(key)
+    if item and float(item.get("score", 0.0)) >= min_score:
+        return str(item["label"])
+    return None
+
+
+def apply_clip_attributes(analysis: SceneAnalysis, enrichment: dict[str, Any] | None, min_score: float = 0.75) -> None:
+    """Fill fields the analyzer left unknown with CLIP labels that clear ``min_score``. Never overrides
+    a value the analyzer already reported."""
+    setting = _confident(enrichment, "setting", min_score)
+    if setting and analysis.environment.setting == Setting.UNKNOWN:
+        analysis.environment.setting = Setting(setting)
+    tod = _confident(enrichment, "time_of_day", min_score)
+    if tod and not analysis.environment.time_of_day:
+        analysis.environment.time_of_day = tod
+    shot = _confident(enrichment, "shot_type", min_score)
+    if shot and analysis.camera.shot_type == ShotType.UNKNOWN:
+        analysis.camera.shot_type = ShotType(shot)
+    angle = _confident(enrichment, "camera_angle", min_score)
+    if angle == "aerial" and analysis.camera.camera_angle == CameraAngle.UNKNOWN:
+        analysis.camera.camera_angle = CameraAngle.AERIAL
+        if analysis.camera.is_aerial is None:
+            analysis.camera.is_aerial = True
+
+
+def clip_phrase(enrichment: dict[str, Any] | None, min_score: float = 0.75) -> str:
+    """One factual sentence from the confident CLIP labels, or '' when none clears ``min_score``."""
+    words: list[str] = []
+    setting = _confident(enrichment, "setting", min_score)
+    if setting:
+        words.append("indoors" if setting == "indoor" else "outdoors")
+    tod = _confident(enrichment, "time_of_day", min_score)
+    if tod:
+        words.append("during the day" if tod == "day" else "at night")
+    shot = _confident(enrichment, "shot_type", min_score)
+    if shot:
+        words.append(f"framed as a {shot.replace('_', '-')} shot")
+    if _confident(enrichment, "camera_angle", min_score) == "aerial":
+        words.append("from an aerial viewpoint")
+    if not words:
+        return ""
+    return "CLIP classifies the shot as " + ", ".join(words) + "."

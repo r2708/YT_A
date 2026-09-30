@@ -105,7 +105,10 @@ ocr:
   static_overlay_min_scenes: 4
 
 vision:
-  provider: heuristic      # heuristic | hf | anthropic | openai_compatible | mock
+  provider: heuristic      # heuristic | cv_models | hf | anthropic | openai_compatible | mock
+  yolo_model: yolov8n.pt   # YOLO model for object detection (n/s/m/l/x)
+  yolo_confidence: 0.5     # Minimum confidence threshold for detections
+  yolo_max_frames: 8       # frames per scene sent to YOLO / CLIP (evenly spaced)
   preset: null             # see config/models.yaml -> presets.vision
   model: null
   base_url: null
@@ -172,6 +175,9 @@ qa:
   allow_unscored_evidence: true
   paraphrase: false        # LLM paraphrasing of template questions (requires llm.provider)
   include_speech_in_answers: true
+  generator: template      # template | spacy | both - template: temporal templates; spacy: dependency-parsed questions per event; both: merged
+  spacy_model: en_core_web_sm  # python -m spacy download en_core_web_sm
+  spacy_max_per_event: 3   # spaCy questions kept per event before the per-video target applies
 
 validation:
   minimum_confidence: 0.75 # >= accepted
@@ -203,14 +209,14 @@ export:
 
 upload:
   provider: huggingface    # none | huggingface - upload final/ automatically once it reaches threshold_mb
-  repo_id: r2708/temporal-video-qa-dataset  # "<user-or-org>/<dataset-name>"; created (private) on first upload if missing
+  repo_id: raj270898/youtube-video-dataset  # "<user-or-org>/<dataset-name>"; created (private) on first upload if missing
   repo_type: dataset
   private: true
   token_env: HF_TOKEN      # write token read from the environment / .env; never put it in this file
-  threshold_mb: 1024       # 1 GB: when the current shard (dataset files [+ media]) reaches this, it is uploaded
+  threshold_mb: 1024        # 250 MB: when the current shard (dataset files [+ media]) reaches this, it is uploaded
   include_media: false     # also upload frames/ and clips/ of the shard's videos (much larger)
   path_in_repo: ""         # optional prefix inside the repo, e.g. "v1"
-  after_upload: archive    # archive: move the uploaded shard to final/uploaded/shard_NNNN (nothing deleted)
+  after_upload: delete     # archive: move the uploaded shard to final/uploaded/shard_NNNN (nothing deleted)
                            # delete:  remove the local copy (and its media when include_media) to free disk
   retries: 3
 

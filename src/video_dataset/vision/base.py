@@ -70,6 +70,10 @@ def create_vision_analyzer(cfg: VisionConfig, device_pref: str = "auto") -> Visi
         from video_dataset.vision.heuristic import HeuristicVisionAnalyzer
 
         return HeuristicVisionAnalyzer()
+    if provider == "cv_models":
+        from video_dataset.vision.cv_vision import CVVisionAnalyzer
+
+        return CVVisionAnalyzer(cfg, cfg.device or device_pref)
     if provider == "mock":
         from video_dataset.vision.mock import MockVisionAnalyzer
 

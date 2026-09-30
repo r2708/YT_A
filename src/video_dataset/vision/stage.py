@@ -14,7 +14,6 @@ from video_dataset.schemas.transcript import Transcript
 from video_dataset.schemas.vision import (
     CameraMovement,
     SceneAnalysis,
-    Setting,
     VerificationVerdict,
     VisionResult,
 )
@@ -24,22 +23,13 @@ from video_dataset.utils.io import read_json, write_json_atomic
 from video_dataset.utils.progress import ProgressLog
 from video_dataset.vision.base import AnalysisContext, create_vision_analyzer, select_evenly
 from video_dataset.vision.enrichers.base import create_enrichers
+from video_dataset.vision.enrichers.clip import apply_clip_attributes
 from video_dataset.vision.heuristic import HeuristicVisionAnalyzer
 from video_dataset.vision.measurements import measure_scene
 
 
 def _load_optional(path: Path, model):  # type: ignore[no-untyped-def]
     return model.model_validate(read_json(path)) if path.exists() else None
-
-
-def _apply_enrichments(analysis: SceneAnalysis, enrichment: dict, min_score: float = 0.75) -> None:
-    attrs = (enrichment or {}).get("attributes") or {}
-    setting = attrs.get("setting")
-    if setting and analysis.environment.setting == Setting.UNKNOWN and setting["score"] >= min_score:
-        analysis.environment.setting = Setting(setting["label"])
-    tod = attrs.get("time_of_day")
-    if tod and not analysis.environment.time_of_day and tod["score"] >= min_score:
-        analysis.environment.time_of_day = tod["label"]
 
 
 def vision_stage(ctx: VideoContext) -> StageOutput:
@@ -149,11 +139,13 @@ def vision_stage(ctx: VideoContext) -> StageOutput:
                     log.warning("frame caption failed for %s: %s", fr.frame_id, str(exc)[:120])
 
         for enr in enrichers:
+            if enr.name in analysis.enrichments:
+                continue  # the analyzer already ran this model (cv_models runs CLIP itself)
             try:
                 data = enr.enrich(scene, frames)
                 analysis.enrichments[enr.name] = data
                 if enr.name == "clip":
-                    _apply_enrichments(analysis, data)
+                    apply_clip_attributes(analysis, data)
             except Exception as exc:
                 log.warning("enricher %s failed on %s: %s", enr.name, scene.scene_id, str(exc)[:120])
 
