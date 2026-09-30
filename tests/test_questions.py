@@ -63,3 +63,66 @@ def test_generator_is_deterministic():
     a = TemporalQAGenerator(cfg).generate("vid_test", 48.0, tl, _scenes(), {}, None)
     b = TemporalQAGenerator(cfg).generate("vid_test", 48.0, tl, _scenes(), {}, None)
     assert [(r.question, r.answer) for r in a] == [(r.question, r.answer) for r in b]
+
+
+# ---------------------------------------------------------------- on-screen text filtering
+from video_dataset.questions.ocr_filter import looks_like_text, recurring_text_events, unusable_text_events  # noqa: E402
+
+
+def _ocr(i, start, text, scene="scene_001"):
+    return _ev(i, start, start + 1.0, f'On-screen text "{text}" is visible.', EventType.TEXT_ON_SCREEN, conf=0.9, entities=[text], action="text_appears", scenes=[scene], precision="frame")
+
+
+def test_looks_like_text_rejects_garbled_ocr_and_keeps_words():
+    for bad in ("LAAATION", "SCENICRnIAX", "nnnnnnnnnnn", "XXXIXX", "§±¶•", "REI", ""):
+        assert not looks_like_text(bad), bad
+    for good in ("SUBSCRIBE", "THANKS FOR WATCHING", "Phantom Thread (2017)", "00:00:00:00", "McDonald's", "iPhone 15", "4K TV", "PRESENTED BY"):
+        assert looks_like_text(good), good
+
+
+def test_recurring_text_families_catch_garbled_watermark_but_not_captions():
+    watermark = ["SCENIC RELAXATION", "SCENIC RFEAXATION", "SCENICRELAXPO", "CENIG RELAXATION", "XATON", "SCEMGRELA", "KATIONY"]
+    captions = ["Lawrence of Arabia (1962)", "Yojimbo (1961)", "Wings (1927)", "Phantom Thread (2017)", "Phantom Thread (2017)"]
+    events = [_ocr(i, float(i * 5), t) for i, t in enumerate(watermark + captions, start=1)]
+    dropped = recurring_text_events(events, max_repeats=3)
+    ids = {e.event_id: e for e in events}
+    dropped_texts = {ids[i].entities[0] for i in dropped}
+    assert set(watermark) <= dropped_texts, dropped_texts
+    assert not (set(captions) & dropped_texts), dropped_texts
+    assert recurring_text_events(events, max_repeats=0) == set()
+
+
+def test_generator_skips_garbled_and_recurring_text_and_caps_text_questions():
+    base = _timeline()
+    garbage = [_ocr(20 + i, 13.0 + i * 2.0, t, scene="scene_004") for i, t in enumerate(["SCENIC RELAXATION", "SCENIC RFEAXATION", "SCENICRELAXPO", "CENIG RELAXATION", "XATON", "SCEMGRELA", "LAAATION"])]
+    caption = _ocr(40, 41.0, "THANKS FOR WATCHING", scene="scene_010")
+    events = base.events + garbage + [caption]
+    rels = RelationBuilder(load_config(None, {"temporal.long_range_min_gap_seconds": "20"}).temporal).build("v", events)
+    tl = Timeline(video_id="v", duration=48.0, events=events, relations=rels)
+    scenes = _scenes()
+    bad = unusable_text_events(tl.events)
+    assert {e.event_id for e in garbage} <= bad and caption.event_id not in bad
+
+    cfg = load_config(None, {"qa.questions_per_minute": "60", "qa.min_questions": "20", "qa.max_questions": "200"}).qa
+    records = TemporalQAGenerator(cfg).generate("vid_test", 48.0, tl, scenes, {}, None)
+    used = {eid for r in records for eid in r.evidence.event_ids}
+    assert not (used & {e.event_id for e in garbage}), "garbled watermark reads must not anchor questions"
+    assert not any("XATON" in r.question or "LAAATION" in r.answer for r in records)
+    text_q = [r for r in records if any(eid.startswith("event_004") for eid in r.evidence.event_ids)]
+    assert len(text_q) <= -(-len(records) * 0.25 // 1) + 1
+
+    # the filter and the cap are switchable: with them off the watermark reads come back
+    off = load_config(None, {"qa.questions_per_minute": "60", "qa.min_questions": "20", "qa.max_questions": "200", "qa.ocr_filter": "false", "qa.ocr_max_repeats": "0", "qa.ocr_max_question_fraction": "1.0"}).qa
+    loose = TemporalQAGenerator(off).generate("vid_test", 48.0, tl, scenes, {}, None)
+    assert {eid for r in loose for eid in r.evidence.event_ids} & {e.event_id for e in garbage}
+
+
+def test_ordering_templates_are_clause_safe():
+    cfg = load_config(None, {"qa.questions_per_minute": "60", "qa.min_questions": "20", "qa.max_questions": "200"}).qa
+    records = TemporalQAGenerator(cfg).generate("vid_test", 48.0, _timeline(), _scenes(), {}, None)
+    ordering = [r for r in records if r.type == QAType.TEMPORAL_ORDERING]
+    assert ordering
+    for r in ordering:
+        assert not r.question.startswith("Does the ") or r.question.startswith("Does the moment when "), r.question
+        assert " happens first." not in r.answer and " occurs around " not in r.answer, r.answer
+        assert r.answer.startswith(("First ", "Before. ", "After. ")), r.answer

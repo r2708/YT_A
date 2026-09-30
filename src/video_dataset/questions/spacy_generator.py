@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from video_dataset.questions.generator import _conf
+from video_dataset.questions.ocr_filter import unusable_text_events
 from video_dataset.schemas.events import Event, EventType, Timeline
 from video_dataset.schemas.qa import Difficulty, Evidence, QARecord, QAType
 from video_dataset.schemas.scene import Scene
@@ -207,7 +208,8 @@ class SpacyQAGenerator:
         """Same signature as ``TemporalQAGenerator.generate`` so the stage can swap generators."""
         self.load()
         rng = random.Random(f"{self.cfg.seed}:spacy:{video_id}")
-        events = [e for e in timeline.events if self.cfg.allow_unscored_evidence or e.confidence is not None]
+        skip = unusable_text_events(timeline.events, shape_filter=bool(self.cfg.ocr_filter), min_chars=int(self.cfg.ocr_min_chars), max_repeats=int(self.cfg.ocr_max_repeats))
+        events = [e for e in timeline.events if (self.cfg.allow_unscored_evidence or e.confidence is not None) and e.event_id not in skip]
         target = int(round(duration / 60.0 * float(self.cfg.questions_per_minute)))
         target = max(int(self.cfg.min_questions), min(int(self.cfg.max_questions), target))
         per_event = max(1, int(getattr(self.cfg, "spacy_max_per_event", 3)))

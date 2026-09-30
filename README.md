@@ -885,6 +885,7 @@ Fully implemented and tested offline:
 * spaCy question generator (`qa.generator: spacy | both`): subject / predicate / object / location questions per event, named-entity questions for speech and on-screen text, same evidence and confidence rules as the templates
 * event extraction from every modality, interval-algebra relations (+ CONTINUES / INTERRUPTS / CHANGES_TO rules), timeline
 * template-based temporal QA for all eight categories with evidence and derived confidence
+* on-screen text hygiene for questions (`qa.ocr_filter`, `qa.ocr_min_chars`, `qa.ocr_max_repeats`, `qa.ocr_max_question_fraction`): garbled OCR reads and recurring watermark / caption spellings never anchor a question, and text-anchored questions are capped per video
 * validation, grounding, quality scores, evidence-aware deduplication, JSONL + Parquet export, statistics
 * SQLite checkpointing, per-scene resume inside vision analysis, retries, per-video logs, Typer CLI
 

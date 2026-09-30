@@ -181,6 +181,10 @@ qa:
   generator: template      # template | spacy | both - template: temporal templates; spacy: dependency-parsed questions per event; both: merged
   spacy_model: en_core_web_sm  # python -m spacy download en_core_web_sm
   spacy_max_per_event: 3   # spaCy questions kept per event before the per-video target applies
+  ocr_filter: true         # skip on-screen text events whose OCR text does not look like words (garbled watermark reads)
+  ocr_min_chars: 4         # on-screen text shorter than this (letters+digits) never anchors a question
+  ocr_max_repeats: 3       # text resembling more than this many other on-screen texts in the video = watermark / caption template
+  ocr_max_question_fraction: 0.25  # max share of a video's questions anchored on on-screen text (>= 1 disables the cap)
 
 validation:
   minimum_confidence: 0.75 # >= accepted

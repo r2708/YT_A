@@ -11,6 +11,7 @@ import random
 from dataclasses import dataclass, field
 
 from video_dataset.config import QAConfig
+from video_dataset.questions.ocr_filter import is_text_anchored, unusable_text_events
 from video_dataset.schemas.common import ConfidenceSource
 from video_dataset.schemas.events import Event, EventType, RelationType, Timeline
 from video_dataset.schemas.qa import Difficulty, Evidence, QARecord, QAType
@@ -86,8 +87,9 @@ class TemporalQAGenerator:
         transcript: Transcript | None = None,
     ) -> list[QARecord]:
         rng = random.Random(f"{self.cfg.seed}:{video_id}")
-        events = [e for e in timeline.events if self.cfg.allow_unscored_evidence or e.confidence is not None]
-        by_id = {e.event_id: e for e in timeline.events}
+        skip = unusable_text_events(timeline.events, shape_filter=bool(self.cfg.ocr_filter), min_chars=int(self.cfg.ocr_min_chars), max_repeats=int(self.cfg.ocr_max_repeats))
+        events = [e for e in timeline.events if (self.cfg.allow_unscored_evidence or e.confidence is not None) and e.event_id not in skip]
+        by_id = {e.event_id: e for e in timeline.events if e.event_id not in skip}
         target = int(round(duration / 60.0 * float(self.cfg.questions_per_minute)))
         target = max(int(self.cfg.min_questions), min(int(self.cfg.max_questions), target))
 
@@ -164,17 +166,25 @@ class TemporalQAGenerator:
         # spread questions over many events, but relax the cap when the timeline is sparse
         n_events = len({e.event_id for pool in pools.values() for c in pool for e in c.events}) or 1
         max_use = max(3, -(-2 * target // n_events))
+        # on-screen text is one signal among many: cap the share of questions anchored on it so a
+        # video full of captions or a misread watermark does not dominate its question set
+        frac = float(self.cfg.ocr_max_question_fraction)
+        text_cap = -(-int(target) * frac // 1) if 0.0 <= frac < 1.0 else None
+        text_used = 0
         active = {t: list(p) for t, p in pools.items() if p and weights.get(t, 0) > 0}
 
         def take(t: QAType) -> Candidate | None:
             pool = active.get(t)
             if pool is None:
                 return None
+            nonlocal text_used
             cand = None
             while pool:
                 c = pool.pop()
                 key = normalize_text(c.question) + "|" + str(c.type)
                 if key in seen_q or any(usage.get(e.event_id, 0) >= max_use for e in c.events):
+                    continue
+                if text_cap is not None and text_used >= text_cap and is_text_anchored(c.events):
                     continue
                 cand = c
                 break
@@ -185,6 +195,8 @@ class TemporalQAGenerator:
             seen_q.add(normalize_text(cand.question) + "|" + str(cand.type))
             for e in cand.events:
                 usage[e.event_id] = usage.get(e.event_id, 0) + 1
+            if is_text_anchored(cand.events):
+                text_used += 1
             chosen.append(cand)
             return cand
 
@@ -266,13 +278,15 @@ class TemporalQAGenerator:
                 opts = [_phrase(first), _phrase(second)]
                 if rng.random() < 0.5:
                     opts.reverse()
+                # event phrases are clauses ("the camera pans left"), so the templates must not treat
+                # them as noun phrases ("does the camera pans left happen ...")
                 if rng.random() < 0.5:
                     q = f"Which happens first: {opts[0]}, or {opts[1]}?"
-                    ans = f"{sentence(_phrase(first))[:-1]} happens first."
+                    ans = f"First {_phrase(first)}, then {_phrase(second)}."
                 else:
-                    q = f"Does {opts[0]} happen before or after {opts[1]}?"
+                    q = f"Does the moment when {opts[0]} come before or after the moment when {opts[1]}?"
                     ans = "Before." if opts[0] == _phrase(first) else "After."
-                    ans += f" {sentence(_phrase(first))[:-1]} occurs around {first.start_time:.1f}s and {_phrase(second)} around {second.start_time:.1f}s."
+                    ans += f" {sentence(_phrase(first))[:-1]} around {first.start_time:.1f}s, and {_phrase(second)} around {second.start_time:.1f}s."
                 out.append(Candidate(QAType.TEMPORAL_ORDERING, q, ans, [a, b], "ordering_v1", options=opts))
         return out
 

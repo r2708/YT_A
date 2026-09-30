@@ -232,6 +232,10 @@ class QAConfig(_Section):
     generator: str = "template"  # template | spacy | both - question generation method
     spacy_model: str = "en_core_web_sm"  # spaCy pipeline for generator=spacy/both (python -m spacy download en_core_web_sm)
     spacy_max_per_event: int = 3  # spaCy questions kept per event before the per-video target applies
+    ocr_filter: bool = True  # skip on-screen text events whose OCR text does not look like words
+    ocr_min_chars: int = 4  # on-screen text shorter than this (letters+digits) never anchors a question
+    ocr_max_repeats: int = 3  # on-screen text resembling more than this many other texts in the video is a watermark/caption template
+    ocr_max_question_fraction: float = 0.25  # max share of a video's questions anchored on on-screen text (>= 1 disables)
 
 
 class ValidationConfig(_Section):
