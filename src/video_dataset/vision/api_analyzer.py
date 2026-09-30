@@ -31,6 +31,7 @@ log = get_logger("vision.api")
 class APIVisionAnalyzer(VisionAnalyzer):
     supports_verification = True
     is_generative = True
+    parallel_safe = True
 
     def __init__(self, client: LLMClient, cfg: VisionConfig):
         self.client = client

@@ -37,6 +37,7 @@ class VideoContext:
     db: StateDB
     input_item: InputItem | None = None
     models: dict[str, Any] = field(default_factory=dict)  # shared model cache (loaded once per process)
+    concurrency: int = 1  # videos the runner is processing at the same time as this one (sizes per-stage thread pools)
     _metadata: VideoMetadata | None = None
     _media_info: MediaInfo | None = None
 

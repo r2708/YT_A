@@ -16,12 +16,14 @@ log = get_logger("validation.verifier")
 
 class Verifier(Protocol):
     name: str
+    parallel_safe: bool
 
     def verify(self, claim: str, frames: list[Frame], context: AnalysisContext) -> VerificationResult: ...
 
 
 class NullVerifier:
     name = "none"
+    parallel_safe = True
 
     def verify(self, claim: str, frames: list[Frame], context: AnalysisContext) -> VerificationResult:
         return VerificationResult(claim=claim, verifier=self.name)
@@ -31,6 +33,7 @@ class HeuristicVerifier:
     """Checks camera-motion claims against optical flow; other claims -> unknown."""
 
     name = "heuristic"
+    parallel_safe = True  # pure numpy over the scan samples
 
     def __init__(self, min_motion: float = 0.35, min_consistency: float = 0.6):
         self.analyzer = HeuristicVisionAnalyzer(min_motion, min_consistency)
@@ -45,6 +48,7 @@ class VLMVerifier:
     def __init__(self, analyzer: VisionAnalyzer):
         self.analyzer = analyzer
         self.name = f"vlm:{analyzer.name}"
+        self.parallel_safe = bool(getattr(analyzer, "parallel_safe", False))
 
     def verify(self, claim: str, frames: list[Frame], context: AnalysisContext) -> VerificationResult:
         return self.analyzer.verify(claim, frames, context)
@@ -57,6 +61,7 @@ class CompositeVerifier:
 
     def __init__(self, verifiers: list[Verifier]):
         self.verifiers = verifiers
+        self.parallel_safe = all(getattr(v, "parallel_safe", False) for v in verifiers)
 
     def verify(self, claim: str, frames: list[Frame], context: AnalysisContext) -> VerificationResult:
         last = VerificationResult(claim=claim, verifier=self.name)

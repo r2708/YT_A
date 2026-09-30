@@ -68,6 +68,7 @@ frame_sampling:
   clip_codec: auto         # auto (stream-copy, re-encode clips that miss the boundary) | libx264 (always exact) | copy (keyframe aligned only)
   clip_tolerance_seconds: 0.25  # a clip whose real length differs from the scene by more than this is re-cut (auto) or flagged (copy)
   clip_max_height: 720     # re-encoded clips are downscaled to this height
+  workers: null            # threads for frame extraction + clip cutting; null -> pipeline.stage_workers
 
 transcription:
   enabled: true
@@ -103,6 +104,7 @@ ocr:
   min_text_length: 3       # drop 1-2 character reads (noise)
   static_overlay_min_scene_fraction: 0.3  # text seen in >= 30% of scenes = watermark/handle/logo, not an event
   static_overlay_min_scenes: 4
+  workers: null            # OCR threads (one engine each); null -> pipeline.stage_workers
 
 vision:
   provider: heuristic      # heuristic | cv_models | hf | anthropic | openai_compatible | mock
@@ -128,6 +130,7 @@ vision:
   device: null
   torch_dtype: auto
   verify_with_model: true
+  workers: null            # scenes analysed concurrently (measurements always; the model only when thread-safe)
 
 llm:
   provider: none           # none | anthropic | openai_compatible | mock  (text-only helper model)
@@ -187,6 +190,7 @@ validation:
   reject_on_missing_files: true
   grounding_min_overlap: 0.3
   max_vlm_verifications_per_video: 200
+  workers: null            # threads for verifier calls; null -> pipeline.stage_workers
 
 deduplication:
   enabled: true

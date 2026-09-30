@@ -10,6 +10,7 @@ from video_dataset.pipeline.context import StageOutput, VideoContext
 from video_dataset.schemas.scene import FrameSamplingResult, SceneDetectionResult
 from video_dataset.stages import Stage
 from video_dataset.utils.io import read_json, write_json_atomic
+from video_dataset.utils.parallel import stage_workers
 
 
 def frame_extraction_stage(ctx: VideoContext) -> StageOutput:
@@ -26,7 +27,8 @@ def frame_extraction_stage(ctx: VideoContext) -> StageOutput:
     plan = [(scene, select_frames(scene, scan_by_scene.get(scene.scene_id), cfg, info.fps)) for scene in scenes]
     extractor = FrameExtractor(ctx.video_path, info.fps, cfg.max_frame_side, cfg.jpeg_quality, ctx.config.project.ffmpeg_path)
     frames_dir = ctx.paths.frames_dir(ctx.video_id)
-    frames = extractor.extract(ctx.video_id, plan, frames_dir)
+    workers = stage_workers(ctx, cfg)
+    frames = extractor.extract(ctx.video_id, plan, frames_dir, workers=workers)
     if not frames:
         raise RuntimeError("no frames could be extracted")
 
@@ -35,7 +37,7 @@ def frame_extraction_stage(ctx: VideoContext) -> StageOutput:
     if cfg.extract_clips:
         clips, clip_stats = extract_clips(
             ctx.video_path, ctx.video_id, scenes, frames, ctx.paths.clips_dir(ctx.video_id), cfg, info.has_audio,
-            ctx.config.project.ffmpeg_path, ctx.config.project.ffprobe_path,
+            ctx.config.project.ffmpeg_path, ctx.config.project.ffprobe_path, workers=workers,
         )
         clip_metrics = clip_stats.as_metrics()
         if clip_stats.reencoded:
@@ -50,6 +52,6 @@ def frame_extraction_stage(ctx: VideoContext) -> StageOutput:
     log.info("%d frames from %d scenes (%s), %d clips", len(frames), len(scenes), reasons, len(clips))
     return StageOutput(
         artifact_path=str(out),
-        metrics={"frames": len(frames), "clips": len(clips), **clip_metrics, "scan_samples": sum(len(s.samples) for s in scans), "reasons": reasons},
+        metrics={"frames": len(frames), "clips": len(clips), **clip_metrics, "workers": workers, "scan_samples": sum(len(s.samples) for s in scans), "reasons": reasons},
         message=f"{len(frames)} frames extracted, {len(clips)} clips",
     )

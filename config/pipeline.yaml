@@ -16,5 +16,8 @@ pipeline:
   stage_retries: 1              # automatic retries of a failed stage within one run
   continue_on_error: true       # a failing video never stops the batch
   workers: 8                   # parallel videos for CPU-bound stages (download..OCR)
+  stage_workers: 0             # threads inside one stage (clip cutting, frame extraction, OCR, vision, verification)
+                               # 0 = auto: min(4, cores) shared across the videos running concurrently (so
+                               # workers: 8 on 8 cores gives 1 thread per video, workers: 1 gives 4)
   model_stages_sequential: false # model stages run one video at a time so models load once
   stage_timeout_seconds: null

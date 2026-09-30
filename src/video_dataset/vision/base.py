@@ -32,6 +32,9 @@ class VisionAnalyzer(ABC):
     supports_video: bool = False
     supports_verification: bool = False
     is_generative: bool = True  # False for measurement-only analyzers
+    # True when analyze_*/verify may be called from several threads at once (pure Python, or a client
+    # that is thread-safe such as the API SDKs). Local torch pipelines are not.
+    parallel_safe: bool = False
 
     @abstractmethod
     def analyze_frame(self, frame: Frame, context: AnalysisContext) -> FrameAnalysis: ...

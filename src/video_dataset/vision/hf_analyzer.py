@@ -35,6 +35,7 @@ _JSON_HINT = (
 class HFVisionAnalyzer(VisionAnalyzer):
     supports_verification = True
     is_generative = True
+    parallel_safe = False  # one torch pipeline, one generate() at a time
 
     def __init__(self, cfg: VisionConfig, device_pref: str = "auto"):
         import torch

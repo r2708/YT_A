@@ -29,7 +29,8 @@ class OCREngine(Protocol):
     def detect(self, image_path: Path) -> list[RawDetection]: ...
 
 
-def create_ocr_engine(cfg: OCRConfig, device: str = "cpu") -> OCREngine | None:
+def create_ocr_engine(cfg: OCRConfig, device: str = "cpu", threads: int | None = None) -> OCREngine | None:
+    """``threads``: per-instance CPU thread cap for engines that support it (RapidOCR); None = engine default."""
     provider = (cfg.provider or "none").lower()
     if not cfg.enabled or provider == "none":
         return None
@@ -47,7 +48,7 @@ def create_ocr_engine(cfg: OCRConfig, device: str = "cpu") -> OCREngine | None:
             if name == "rapidocr":
                 from video_dataset.ocr.rapidocr_adapter import RapidOCREngine
 
-                return RapidOCREngine()
+                return RapidOCREngine(threads=threads)
             if name == "easyocr":
                 from video_dataset.ocr.easyocr_adapter import EasyOCREngine
 

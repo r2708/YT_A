@@ -105,6 +105,7 @@ class FrameSamplingConfig(_Section):
     clip_codec: str = "auto"
     clip_tolerance_seconds: float = 0.25
     clip_max_height: int = 720  # re-encoded clips are downscaled to this height
+    workers: int | None = None  # threads for frame extraction + clip cutting; null -> pipeline.stage_workers
 
 
 class TranscriptionConfig(_Section):
@@ -145,6 +146,7 @@ class OCRConfig(_Section):
     # scenes) are watermarks / handles / logos: kept in the OCR file, excluded from events and QA.
     static_overlay_min_scene_fraction: float = 0.3
     static_overlay_min_scenes: int = 4
+    workers: int | None = None  # OCR threads (one engine instance each); null -> pipeline.stage_workers
 
 
 class VisionConfig(_Section):
@@ -171,6 +173,9 @@ class VisionConfig(_Section):
     device: str | None = None
     torch_dtype: str = "auto"
     verify_with_model: bool = True  # run the model as verifier when it supports verification
+    # Scenes analysed concurrently. Measurements always run in parallel; the analyzer itself only when
+    # it is thread-safe (heuristic, mock, API providers). Local torch models stay sequential.
+    workers: int | None = None  # null -> pipeline.stage_workers
 
 
 class LLMConfig(_Section):
@@ -237,6 +242,7 @@ class ValidationConfig(_Section):
     reject_on_missing_files: bool = True
     grounding_min_overlap: float = 0.3
     max_vlm_verifications_per_video: int = 200
+    workers: int | None = None  # threads for verifier calls; null -> pipeline.stage_workers
 
 
 class DeduplicationConfig(_Section):
@@ -310,7 +316,8 @@ class PipelineStagesConfig(_Section):
     )
     stage_retries: int = 1
     continue_on_error: bool = True
-    workers: int = 1
+    workers: int = 1  # videos processed concurrently in the CPU phase (DOWNLOAD..AUDIO)
+    stage_workers: int = 0  # threads inside a stage (clips, frames, OCR, vision, verification); 0 = auto (min(4, cores))
     model_stages_sequential: bool = True
     stage_timeout_seconds: int | None = None
 

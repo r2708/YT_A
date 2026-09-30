@@ -64,3 +64,18 @@ def test_unknown_codec_rejected(synthetic_video: Path, tmp_path: Path):
     cfg = load_config(None, {"frame_sampling.clip_codec": "prores"}).frame_sampling
     with pytest.raises(ValueError, match="clip_codec"):
         extract_clips(synthetic_video, "v", _scenes(BOUNDS[:1]), [], tmp_path, cfg, True)
+
+
+@pytest.mark.slow
+def test_parallel_workers_produce_the_same_clips(synthetic_video: Path, tmp_path: Path):
+    cfg = load_config(None, {"frame_sampling.clip_codec": "auto", "frame_sampling.clip_tolerance_seconds": "0.1", "frame_sampling.clip_max_duration": "1.0"}).frame_sampling
+    info = probe_media(synthetic_video)
+    seq, s1 = extract_clips(synthetic_video, "v", _scenes(BOUNDS), [], tmp_path / "seq", cfg, info.has_audio, workers=1)
+    par, s4 = extract_clips(synthetic_video, "v", _scenes(BOUNDS), [], tmp_path / "par", cfg, info.has_audio, workers=4)
+    assert s1.total == s4.total > len(BOUNDS)  # clip_max_duration splits scenes into parts
+    assert s4.failed == 0 and s4.inexact == 0 and s4.reused == 0
+    assert [c.clip_id for c in par] == [c.clip_id for c in seq]  # order is preserved
+    for a, b in zip(seq, par):
+        assert (a.scene_id, a.start_time, a.end_time, a.exact) == (b.scene_id, b.start_time, b.end_time, b.exact)
+        assert b.media_duration is not None and abs(b.media_duration - a.media_duration) < 0.05
+        assert Path(b.clip_path).exists()

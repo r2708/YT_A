@@ -12,6 +12,7 @@ from video_dataset.schemas.scene import Frame, Scene
 from video_dataset.utils.ffmpeg import run_ffmpeg
 from video_dataset.utils.ids import frame_id as make_frame_id
 from video_dataset.utils.logging import get_logger
+from video_dataset.utils.parallel import chunk_evenly, parallel_map
 from video_dataset.utils.progress import ProgressLog
 
 log = get_logger("frame_sampling.extract")
@@ -42,23 +43,22 @@ class FrameExtractor:
             log.warning("ffmpeg frame fallback failed at %.3fs: %s", timestamp, exc)
             return False
 
-    def extract(self, video_id: str, plan: list[tuple[Scene, list[Candidate]]], out_root: Path) -> list[Frame]:
-        requests: list[tuple[Scene, Candidate, int]] = []
-        for scene, cands in plan:
-            for k, c in enumerate(cands):
-                requests.append((scene, c, k))
-        requests.sort(key=lambda r: (r[1].frame_index, r[1].timestamp))
-
+    def _extract_range(self, video_id: str, requests: list[tuple[Scene, Candidate, int]], out_root: Path, progress: ProgressLog) -> list[Frame]:
+        """Sequentially decode one contiguous, sorted range of requests with its own capture."""
         cap = cv2.VideoCapture(str(self.video_path))
         if not cap.isOpened():
             raise RuntimeError(f"cannot open {self.video_path}")
         frames: list[Frame] = []
         pos = 0  # index of the next frame cap.read() would return
-        log.info("extracting %d frames from %d scenes -> %s", len(requests), len(plan), out_root)
-        progress = ProgressLog(log, "frame extraction", len(requests), unit="frames", every_seconds=10)
         try:
-            for i, (scene, cand, k) in enumerate(requests, 1):
-                progress.update(i - 1, extra=f"scene {scene.index}")
+            if requests:
+                first = requests[0][1].frame_index
+                if first > 0:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, first)
+                    pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                    if pos < 0 or abs(pos - first) > 5:
+                        pos = first
+            for scene, cand, k in requests:
                 target = cand.frame_index
                 if target < pos or target - pos > 120:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, target)
@@ -75,6 +75,7 @@ class FrameExtractor:
                 scene_dir.mkdir(parents=True, exist_ok=True)
                 fid = make_frame_id(scene.index, k)
                 out = scene_dir / f"{fid}_t{cand.timestamp:09.3f}.jpg"
+                progress.step(1, extra=f"scene {scene.index}")
                 if not ok or img is None:
                     if not self._ffmpeg_fallback(cand.timestamp, out):
                         log.warning("could not extract frame %s at %.3fs", fid, cand.timestamp)
@@ -105,6 +106,23 @@ class FrameExtractor:
                 )
         finally:
             cap.release()
+        return frames
+
+    def extract(self, video_id: str, plan: list[tuple[Scene, list[Candidate]]], out_root: Path, workers: int = 1) -> list[Frame]:
+        """Extract every planned frame. With ``workers`` > 1 the sorted request list is split into
+        contiguous ranges, each decoded by its own VideoCapture on a thread (OpenCV releases the GIL
+        while decoding, so this scales with cores without loading the video into RAM)."""
+        requests: list[tuple[Scene, Candidate, int]] = []
+        for scene, cands in plan:
+            for k, c in enumerate(cands):
+                requests.append((scene, c, k))
+        requests.sort(key=lambda r: (r[1].frame_index, r[1].timestamp))
+        workers = max(1, min(int(workers or 1), max(1, len(requests) // 50)))  # a range needs enough frames to pay for its seek
+        log.info("extracting %d frames from %d scenes -> %s (%d worker%s)", len(requests), len(plan), out_root, workers, "s" if workers != 1 else "")
+        progress = ProgressLog(log, "frame extraction", len(requests), unit="frames", every_seconds=10)
+        ranges = chunk_evenly(requests, workers)
+        parts = parallel_map(lambda rng: self._extract_range(video_id, rng, out_root, progress), ranges, workers)
+        frames = [f for part in parts for f in part]
         progress.finish(f"{len(frames)} frames written")
         frames.sort(key=lambda f: (f.timestamp, f.frame_id))
         return frames

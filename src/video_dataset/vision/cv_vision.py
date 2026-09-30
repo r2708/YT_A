@@ -55,6 +55,7 @@ class CVVisionAnalyzer(VisionAnalyzer):
     name = "cv_models"
     is_generative = False
     supports_verification = False
+    parallel_safe = False  # the ultralytics predictor keeps state between calls; torch already uses all cores
 
     def __init__(self, cfg: VisionConfig, device: str = "cpu"):
         self.cfg = cfg

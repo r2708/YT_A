@@ -380,7 +380,7 @@ qa:              { questions_per_minute: 5, min_questions: 8, max_questions: 400
 validation:      { minimum_confidence: 0.75, review_confidence: 0.5, verifier: heuristic, grounding_min_overlap: 0.3 }
 deduplication:   { near_duplicate_threshold: 0.9, question_similarity_threshold: 0.92, evidence_iou_threshold: 0.5 }
 export:          { formats: [jsonl, parquet], include_review: true, include_rejected: false }
-pipeline:        { stage_retries: 1, continue_on_error: true, workers: 1, model_stages_sequential: true }
+pipeline:        { stage_retries: 1, continue_on_error: true, workers: 1, stage_workers: 0, model_stages_sequential: true }
 ```
 
 `max_scene_duration` splits very long shots for analysis; those boundaries are marked
@@ -662,6 +662,15 @@ lexically against their evidence (`grounding_min_overlap`); records with `null` 
 
 * The video is never loaded into RAM: FFmpeg streams a downscaled 4 fps analysis stream for the scan
   pass, frames are extracted by sequential seeking, audio is read in windows, clips are cut by FFmpeg.
+* `pipeline.stage_workers` (default `0` = auto) parallelises *inside* a stage for one video: clip cutting
+  and frame extraction (FRAME_EXTRACTION), OCR (one engine instance per thread), scene measurements and
+  thread-safe analyzers in VISION_ANALYSIS (heuristic, mock, API providers; local `hf` / `cv_models`
+  models stay sequential and are already multi-threaded inside torch) and verifier calls in VALIDATION.
+  Auto = `min(4, cores)` shared between the videos running at the same time, so `--workers 8` on an
+  8-core box gives one thread per video and `--workers 1` gives four. Per-stage overrides:
+  `frame_sampling.workers`, `ocr.workers`, `vision.workers`, `validation.workers`. Output is identical to
+  the sequential run (ids, order, checkpoints); only wall-clock time changes. The rest of VALIDATION
+  (grounding, quality, dedup) is pure Python and stays single-threaded on purpose.
 * `--workers N` runs DOWNLOAD..AUDIO for N videos concurrently; model stages run sequentially so each
   model loads once per process (`pipeline.model_stages_sequential`).
 * `frame_sampling.analysis_fps`, `analysis_width`, `max_frames_per_scene`, `vision.max_images_per_request`

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import queue
 from pathlib import Path
 
 from video_dataset.ocr.base import create_ocr_engine
@@ -12,6 +14,7 @@ from video_dataset.schemas.scene import Frame, FrameSamplingResult
 from video_dataset.stages import Stage
 from video_dataset.utils.device import resolve_device
 from video_dataset.utils.io import read_json, write_json_atomic
+from video_dataset.utils.parallel import parallel_map, stage_workers
 from video_dataset.utils.progress import ProgressLog
 
 
@@ -48,27 +51,59 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
         return StageOutput(artifact_path=str(out), metrics={"detections": 0, "tracks": 0}, message="skipped (no OCR engine)", skipped=True)
 
     targets = pick_frames_for_ocr(frames, cfg.max_frames_per_scene)
+    workers = stage_workers(ctx, cfg, len(targets))
+    engines: queue.Queue = queue.Queue()
+    if workers > 1:
+        # One engine instance per thread, each capped to its share of the cores: ONNX runtime already
+        # multi-threads a single instance, so N uncapped instances only oversubscribe the CPU.
+        threads = max(1, (os.cpu_count() or 1) // workers)
+
+        def _load_pool() -> list:
+            log.info("loading %d OCR engine instances (%d thread%s each) for parallel OCR", workers, threads, "s" if threads != 1 else "")
+            pool = [create_ocr_engine(cfg, resolve_device(ctx.config.project.device), threads=threads) for _ in range(workers)]
+            return [e for e in pool if e is not None]
+
+        for eng in ctx.get_model(f"ocr:{cfg.provider}:pool:{workers}", _load_pool) or [engine]:
+            engines.put(eng)
+    else:
+        engines.put(engine)
+    workers = engines.qsize()
+
+    log.info(
+        "running %s on %d of %d frames (max %d per scene, %d worker%s)",
+        getattr(engine, "name", cfg.provider), len(targets), len(frames), cfg.max_frames_per_scene, workers, "s" if workers != 1 else "",
+    )
+    progress = ProgressLog(log, "OCR", len(targets), unit="frames", every_seconds=15)
+    counts = {"detections": 0}
+
+    def _detect(frame: Frame) -> list | None:
+        """Raw detections for one frame, None on failure / missing file. Runs on a worker thread."""
+        path = Path(frame.frame_path)
+        if not path.exists():
+            return []
+        eng = engines.get()
+        try:
+            raw = eng.detect(path)
+        except Exception as exc:
+            log.warning("OCR failed on %s: %s", path.name, exc)
+            return None
+        finally:
+            engines.put(eng)
+        return [d for d in raw if not (d.confidence is not None and d.confidence < cfg.min_confidence) and len(d.text.strip()) >= cfg.min_text_length]
+
+    def _tick(i: int, raw: list | None) -> None:
+        counts["detections"] += len(raw or [])
+        progress.update(i + 1, extra=f"{counts['detections']} detections")
+
+    per_frame = parallel_map(_detect, targets, workers, on_done=_tick)
     detections: list[OCRDetection] = []
     failures = 0
     n = 0
-    log.info("running %s on %d of %d frames (max %d per scene)", getattr(engine, "name", cfg.provider), len(targets), len(frames), cfg.max_frames_per_scene)
-    progress = ProgressLog(log, "OCR", len(targets), unit="frames", every_seconds=15)
-    for i, frame in enumerate(targets, 1):
-        progress.update(i - 1, extra=f"{len(detections)} detections")
-        path = Path(frame.frame_path)
-        if not path.exists():
-            continue
-        try:
-            raw = engine.detect(path)
-        except Exception as exc:
+    for frame, raw in zip(targets, per_frame):  # in frame order -> deterministic detection ids
+        if raw is None:
             failures += 1
-            log.warning("OCR failed on %s: %s", path.name, exc)
             continue
         for det in raw:
-            if det.confidence is not None and det.confidence < cfg.min_confidence:
-                continue
-            if len(det.text.strip()) < cfg.min_text_length:
-                continue
             n += 1
             detections.append(
                 OCRDetection(
@@ -92,6 +127,6 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
     log.info("%d detections -> %d text tracks over %d frames (%d failures); %d overlay tracks %s, %d fragments", len(detections), len(tracks), len(targets), failures, n_overlay, overlays, n_fragment)
     return StageOutput(
         artifact_path=str(out),
-        metrics={"frames": len(targets), "detections": len(detections), "tracks": len(tracks), "static_overlay_tracks": n_overlay, "fragment_tracks": n_fragment, "static_overlays": overlays, "failures": failures, "engine": engine.name},
+        metrics={"frames": len(targets), "workers": workers, "detections": len(detections), "tracks": len(tracks), "static_overlay_tracks": n_overlay, "fragment_tracks": n_fragment, "static_overlays": overlays, "failures": failures, "engine": engine.name},
         message=f"{len(detections)} text detections ({len(tracks) - n_overlay - n_fragment} usable, {n_overlay} overlay, {n_fragment} fragments)",
     )

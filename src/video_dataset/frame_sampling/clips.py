@@ -19,6 +19,7 @@ from video_dataset.schemas.scene import Clip, Frame, Scene
 from video_dataset.utils.ffmpeg import ffprobe_json, run_ffmpeg
 from video_dataset.utils.ids import clip_id as make_clip_id
 from video_dataset.utils.logging import get_logger
+from video_dataset.utils.parallel import parallel_map
 from video_dataset.utils.progress import ProgressLog
 
 log = get_logger("frame_sampling.clips")
@@ -86,6 +87,84 @@ def _cut(video_path: Path, out: Path, start: float, end: float, *, reencode: boo
     run_ffmpeg(args, ffmpeg_path=ffmpeg_path)
 
 
+@dataclass
+class _ClipTask:
+    scene: Scene
+    part: int
+    start: float
+    end: float
+
+
+def _plan(scenes: list[Scene], max_len: float) -> list[_ClipTask]:
+    tasks: list[_ClipTask] = []
+    for scene in scenes:
+        n_parts = max(1, int(scene.duration // max_len) + (1 if scene.duration % max_len > 0.5 else 0)) if scene.duration > max_len else 1
+        part_len = scene.duration / n_parts
+        for part in range(n_parts):
+            start = scene.start_time + part * part_len
+            end = scene.end_time if part == n_parts - 1 else start + part_len
+            if end - start < 0.05:
+                continue
+            tasks.append(_ClipTask(scene, part, start, end))
+    return tasks
+
+
+def _cut_one(
+    task: _ClipTask, video_path: Path, video_id: str, frames: list[Frame], out_dir: Path, codec: str, tolerance: float,
+    clip_height: int, has_audio: bool, ffmpeg_path: str | None, ffprobe_path: str | None,
+) -> tuple[Clip | None, dict[str, float], str | None]:
+    """Cut / measure / re-cut one clip. Returns (clip, stat deltas, error) and never raises."""
+    scene, start, end = task.scene, task.start, task.end
+    expected = end - start
+    cid = make_clip_id(scene.index, task.part)
+    out = out_dir / f"{cid}.mp4"
+    delta: dict[str, float] = {"stream_copied": 0, "reencoded": 0, "reused": 0, "error": 0.0}
+    produced_by: str | None = None
+    measured: float | None = None
+    try:
+        if out.exists() and out.stat().st_size > 0:
+            measured = media_duration(out, ffprobe_path)
+            delta["reused"] += 1
+        elif codec == "libx264":
+            _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
+            produced_by = "libx264"
+            measured = media_duration(out, ffprobe_path)
+            delta["reencoded"] += 1
+        else:
+            _cut(video_path, out, start, end, reencode=False, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
+            produced_by = "copy"
+            measured = media_duration(out, ffprobe_path)
+            delta["stream_copied"] += 1
+
+        error = abs(measured - expected) if measured is not None else 0.0
+        if error > tolerance and codec == "auto":
+            # keyframe-aligned copy missed the boundary: re-cut this clip exactly
+            log.debug("clip %s is %.2fs vs scene %.2fs; re-encoding", cid, measured or -1, expected)
+            _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
+            produced_by = "libx264"
+            measured = media_duration(out, ffprobe_path)
+            error = abs(measured - expected) if measured is not None else 0.0
+            delta["reencoded"] += 1
+    except Exception as exc:
+        log.warning("clip %s failed: %s", cid, exc)
+        return None, delta, f"{cid}: {exc}"[:200]
+
+    delta["error"] = error
+    clip = Clip(
+        clip_id=cid,
+        video_id=video_id,
+        scene_id=scene.scene_id,
+        start_time=round(start, 3),
+        end_time=round(end, 3),
+        clip_path=str(out),
+        frame_ids=[f.frame_id for f in frames if f.scene_id == scene.scene_id and start - 1e-3 <= f.timestamp <= end + 1e-3],
+        media_duration=round(measured, 3) if measured is not None else None,
+        exact=error <= tolerance,
+        codec=produced_by,
+    )
+    return clip, delta, None
+
+
 def extract_clips(
     video_path: Path,
     video_id: str,
@@ -96,7 +175,10 @@ def extract_clips(
     has_audio: bool,
     ffmpeg_path: str | None = None,
     ffprobe_path: str | None = None,
+    workers: int = 1,
 ) -> tuple[list[Clip], ClipStats]:
+    """Cut every scene (split into ``clip_max_duration`` parts) on ``workers`` threads. FFmpeg and
+    ffprobe run as subprocesses, so threads give near-linear speed-up; results keep scene order."""
     out_dir.mkdir(parents=True, exist_ok=True)
     codec = (cfg.clip_codec or "auto").lower()
     if codec not in CLIP_CODECS:
@@ -104,79 +186,38 @@ def extract_clips(
     tolerance = float(cfg.clip_tolerance_seconds or 0.25)
     clip_height = int(cfg.clip_max_height or 720)
     max_len = float(cfg.clip_max_duration or 0) or float("inf")
-    stats = ClipStats()
-    clips: list[Clip] = []
-    log.info("cutting clips for %d scenes -> %s (codec=%s, max %.0fs each)", len(scenes), out_dir, codec, max_len if max_len != float("inf") else 0)
-    progress = ProgressLog(log, "clip extraction", len(scenes), unit="scenes", every_seconds=10)
+    tasks = _plan(scenes, max_len)
+    workers = max(1, min(int(workers or 1), len(tasks) or 1))
+    stats = ClipStats(total=len(tasks))
+    log.info(
+        "cutting %d clips for %d scenes -> %s (codec=%s, max %.0fs each, %d worker%s)",
+        len(tasks), len(scenes), out_dir, codec, max_len if max_len != float("inf") else 0, workers, "s" if workers != 1 else "",
+    )
+    progress = ProgressLog(log, "clip extraction", len(tasks), unit="clips", every_seconds=10)
 
-    for si, scene in enumerate(scenes, 1):
-        progress.update(si - 1, extra=f"{stats.total} clips, {stats.reencoded} re-encoded")
-        n_parts = max(1, int(scene.duration // max_len) + (1 if scene.duration % max_len > 0.5 else 0)) if scene.duration > max_len else 1
-        part_len = scene.duration / n_parts
-        for part in range(n_parts):
-            start = scene.start_time + part * part_len
-            end = scene.end_time if part == n_parts - 1 else start + part_len
-            expected = end - start
-            if expected < 0.05:
-                continue
-            cid = make_clip_id(scene.index, part)
-            out = out_dir / f"{cid}.mp4"
-            stats.total += 1
-            produced_by: str | None = None
-            measured: float | None = None
+    def _run(task: _ClipTask) -> tuple[Clip | None, dict[str, float], str | None]:
+        return _cut_one(task, video_path, video_id, frames, out_dir, codec, tolerance, clip_height, has_audio, ffmpeg_path, ffprobe_path)
 
-            try:
-                if out.exists() and out.stat().st_size > 0:
-                    measured = media_duration(out, ffprobe_path)
-                    stats.reused += 1
-                elif codec == "libx264":
-                    _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
-                    produced_by = "libx264"
-                    measured = media_duration(out, ffprobe_path)
-                    stats.reencoded += 1
-                else:
-                    _cut(video_path, out, start, end, reencode=False, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
-                    produced_by = "copy"
-                    measured = media_duration(out, ffprobe_path)
-                    stats.stream_copied += 1
-
-                error = abs(measured - expected) if measured is not None else 0.0
-                if error > tolerance and codec == "auto":
-                    # keyframe-aligned copy missed the boundary: re-cut this clip exactly
-                    log.debug("clip %s is %.2fs vs scene %.2fs; re-encoding", cid, measured or -1, expected)
-                    _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
-                    produced_by = "libx264"
-                    measured = media_duration(out, ffprobe_path)
-                    error = abs(measured - expected) if measured is not None else 0.0
-                    stats.reencoded += 1
-            except Exception as exc:
-                stats.failed += 1
-                stats.errors.append(f"{cid}: {exc}"[:200])
-                log.warning("clip %s failed: %s", cid, exc)
-                continue
-
-            exact = error <= tolerance
-            if not exact:
+    def _collect(i: int, res: tuple[Clip | None, dict[str, float], str | None]) -> None:
+        clip, delta, err = res
+        stats.stream_copied += int(delta["stream_copied"])
+        stats.reencoded += int(delta["reencoded"])
+        stats.reused += int(delta["reused"])
+        if err is not None:
+            stats.failed += 1
+            stats.errors.append(err)
+        elif clip is not None:
+            if not clip.exact:
                 stats.inexact += 1
-            stats.worst_error_seconds = max(stats.worst_error_seconds, error)
-            clips.append(
-                Clip(
-                    clip_id=cid,
-                    video_id=video_id,
-                    scene_id=scene.scene_id,
-                    start_time=round(start, 3),
-                    end_time=round(end, 3),
-                    clip_path=str(out),
-                    frame_ids=[f.frame_id for f in frames if f.scene_id == scene.scene_id and start - 1e-3 <= f.timestamp <= end + 1e-3],
-                    media_duration=round(measured, 3) if measured is not None else None,
-                    exact=exact,
-                    codec=produced_by,
-                )
-            )
+            stats.worst_error_seconds = max(stats.worst_error_seconds, float(delta["error"]))
+        progress.update(i + 1, extra=f"{stats.reencoded} re-encoded, {stats.failed} failed")
+
+    results = parallel_map(_run, tasks, workers, on_done=_collect)
+    clips = [clip for clip, _d, _e in results if clip is not None]
     if stats.inexact:
         log.warning(
             "%d of %d clips are off by more than %.2fs (worst %.2fs); use frame_sampling.clip_codec=auto or libx264 for exact cuts",
             stats.inexact, stats.total, tolerance, stats.worst_error_seconds,
         )
-    progress.finish(f"{stats.total} clips")
+    progress.finish(f"{len(clips)} clips")
     return clips, stats

@@ -39,5 +39,7 @@ def test_config(tmp_path: Path):
         "scene_detection.max_scene_duration": "60",
         "qa.min_questions": "8",
         "pipeline.stage_retries": "0",
+        "pipeline.stage_workers": "3",  # exercise the intra-stage thread pools
+        "cleanup.after_export": "none",  # the tests read the working files after EXPORT
     }
     return load_config(None, overrides, config_dir=ROOT / "config")

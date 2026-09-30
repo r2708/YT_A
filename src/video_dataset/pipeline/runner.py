@@ -171,7 +171,7 @@ class PipelineRunner:
         return registered
 
     def context(self, video_id: str, item: InputItem | None = None) -> VideoContext:
-        return VideoContext(video_id=video_id, config=self.config, paths=self.paths, db=self.db, input_item=item, models=self.models)
+        return VideoContext(video_id=video_id, config=self.config, paths=self.paths, db=self.db, input_item=item, models=self.models, concurrency=max(1, int(getattr(self, "active_videos", 1))))
 
     def input_for(self, video_id: str) -> InputItem | None:
         """The InputItem of a registered video, rebuilt from the URL stored at registration time.
@@ -334,6 +334,7 @@ class PipelineRunner:
         )
         # Phase A: download .. audio, parallel across videos
         if cpu_stages:
+            self.active_videos = min(workers, len(registered)) if workers > 1 and len(registered) > 1 else 1
             if workers > 1 and len(registered) > 1:
                 with ThreadPoolExecutor(max_workers=workers) as pool:
                     futs = {pool.submit(self.run_video, vid, item, cpu_stages): vid for vid, item in registered}
@@ -352,6 +353,7 @@ class PipelineRunner:
         if rest and pending:
             log.info("batch: phase 2 (%s) for %d video(s)", " ".join(STAGE_LABELS[s] for s in rest), len(pending))
         if rest and (self.config.pipeline.model_stages_sequential or workers == 1):
+            self.active_videos = 1
             for vid, item in pending:
                 prev = results.get(vid)
                 r = self.run_video(vid, item, rest)
@@ -363,6 +365,7 @@ class PipelineRunner:
                 results[vid] = r
                 _report("model", len(pending), r)
         elif rest:
+            self.active_videos = min(workers, len(pending))
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futs = {pool.submit(self.run_video, vid, item, rest): vid for vid, item in pending}
                 for fut in as_completed(futs):
@@ -377,6 +380,7 @@ class PipelineRunner:
                     _report("model", len(pending), r)
 
         ordered = [results[vid] for vid, _ in registered if vid in results]
+        self.active_videos = 1
         self._release_models()
         log.info("batch: finished %d video(s) in %s, %d failed", len(ordered), fmt_seconds(time.time() - t_batch), sum(1 for r in ordered if not r.completed))
         return ordered

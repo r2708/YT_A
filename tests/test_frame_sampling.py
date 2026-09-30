@@ -70,3 +70,17 @@ def test_scan_and_extract_on_synthetic_video(synthetic_video: Path, tmp_path: Pa
         assert Path(f.frame_path).exists() and f.width == 640 and f.height == 360
         sc = next(s for s in scenes if s.scene_id == f.scene_id)
         assert sc.start_time - 0.05 <= f.timestamp <= sc.end_time + 0.05
+
+
+@pytest.mark.slow
+def test_parallel_frame_extraction_matches_sequential(synthetic_video: Path, tmp_path: Path):
+    cfg = load_config(None, {"frame_sampling.max_frames_per_scene": "20", "frame_sampling.min_frames_per_scene": "20", "frame_sampling.min_frame_gap_seconds": "0.1"}).frame_sampling
+    info = probe_media(synthetic_video)
+    scenes = [_scene(0.0, 4.0, 24.0, 0), _scene(4.0, 8.0, 24.0, 1), _scene(8.0, 11.5, 24.0, 2), _scene(11.5, info.duration, 24.0, 3)]
+    scans = scan_video(synthetic_video, info, scenes, cfg)
+    plan = [(sc, select_frames(sc, scan, cfg, info.fps)) for sc, scan in zip(scenes, scans)]
+    seq = FrameExtractor(synthetic_video, info.fps, 320, 90).extract("vid_test", plan, tmp_path / "seq", workers=1)
+    par = FrameExtractor(synthetic_video, info.fps, 320, 90).extract("vid_test", plan, tmp_path / "par", workers=3)
+    assert len(seq) >= 60 and len(par) == len(seq)
+    assert [(f.frame_id, f.frame_index, f.timestamp, f.width, f.height) for f in par] == [(f.frame_id, f.frame_index, f.timestamp, f.width, f.height) for f in seq]
+    assert all(Path(f.frame_path).exists() for f in par)

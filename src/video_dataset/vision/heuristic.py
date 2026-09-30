@@ -58,6 +58,7 @@ class HeuristicVisionAnalyzer(VisionAnalyzer):
     model = None
     is_generative = False
     supports_verification = True
+    parallel_safe = True
 
     def __init__(self, min_motion: float = 0.35, min_consistency: float = 0.6):
         self.min_motion = min_motion

@@ -215,6 +215,7 @@ def test_runner_keeps_frames_when_configured_or_uploading_media(synthetic_video:
     for keep_via in ("flag", "include_media"):
         cfg = test_config.model_copy(deep=True)
         cfg.ocr.provider = "none"
+        cfg.cleanup.after_export = "media"  # this test is about what "media" keeps (the fixture disables cleanup)
         if keep_via == "flag":
             cfg.cleanup.frames_and_clips = False
         else:

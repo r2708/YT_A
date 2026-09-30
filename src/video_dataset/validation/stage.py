@@ -22,6 +22,7 @@ from video_dataset.schemas.vision import VerificationVerdict, VisionResult
 from video_dataset.stages import Stage
 from video_dataset.utils.device import resolve_device
 from video_dataset.utils.io import read_json, write_json_atomic
+from video_dataset.utils.parallel import parallel_map, stage_workers
 from video_dataset.validation.checks import (
     check_files_exist,
     check_ids_exist,
@@ -131,10 +132,14 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
             vs.validation.issues.append("description identical to another scene")
 
     # ------------------------------------------------------------------ events
+    # pass 1: cheap structural checks; pass 2: verifier calls (the only expensive part) on the pool,
+    # in timeline order and within the per-video budget; pass 3: status + quality.
     v_events: list[ValidatedEvent] = []
     event_quality_by_id: dict[str, QualityScore] = {}
     n_verified = 0
     budget = int(vcfg.max_vlm_verifications_per_video)
+    prepared: list[tuple[Event, dict, list[str], list[str]]] = []
+    to_verify: list[tuple[Event, list, AnalysisContext]] = []
     for e in timeline.events:
         checks = {}
         issues = []
@@ -161,17 +166,34 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
             hard.append(msg or "empty event")
         # verification of model-generated claims
         if e.source == EventSource.VISION and e.event_type in (EventType.ACTION, EventType.APPEARANCE) and budget > 0 and not hard:
-            sc = e.scene_ids[0] if e.scene_ids else None
-            fr = [frames[f] for f in e.frame_ids if f in frames] or (frames_by_scene.get(sc, []) if sc else [])
-            context = AnalysisContext(video_id=ctx.video_id, scan=scans.get(sc) if sc else None)
             if e.verification is None or e.verification.verdict == VerificationVerdict.UNKNOWN:
-                res = verifier.verify(e.event, fr, context)
+                sc = e.scene_ids[0] if e.scene_ids else None
+                fr = [frames[f] for f in e.frame_ids if f in frames] or (frames_by_scene.get(sc, []) if sc else [])
+                to_verify.append((e, fr, AnalysisContext(video_id=ctx.video_id, scan=scans.get(sc) if sc else None)))
                 budget -= 1
-                if res.verdict != VerificationVerdict.UNKNOWN:
-                    e.verification = res
-                    e.confidence = res.score
-                    e.confidence_source = ConfidenceSource.VERIFIER
-                    n_verified += 1
+        prepared.append((e, checks, issues, hard))
+
+    v_workers = stage_workers(ctx, vcfg, len(to_verify)) if getattr(verifier, "parallel_safe", False) else 1
+    if to_verify:
+        log.info("verifying %d event claims with %s (%d worker%s)", len(to_verify), verifier.name, v_workers, "s" if v_workers != 1 else "")
+
+    def _verify(item: tuple[Event, list, AnalysisContext]):  # type: ignore[no-untyped-def]
+        e, fr, context = item
+        try:
+            return verifier.verify(e.event, fr, context)
+        except Exception as exc:
+            log.warning("verifier failed on %s: %s", e.event_id, str(exc)[:160])
+            return None
+
+    for (e, _fr, _ctx), res in zip(to_verify, parallel_map(_verify, to_verify, v_workers)):
+        if res is not None and res.verdict != VerificationVerdict.UNKNOWN:
+            e.verification = res
+            e.confidence = res.score
+            e.confidence_source = ConfidenceSource.VERIFIER
+            n_verified += 1
+
+    for e, checks, issues, hard in prepared:
+        if e.source == EventSource.VISION and e.event_type in (EventType.ACTION, EventType.APPEARANCE) and not hard:
             if e.verification is not None and e.verification.verdict == VerificationVerdict.UNSUPPORTED:
                 hard.append("verifier found the claim unsupported by the frames")
         suggested = confidence_status(e.confidence, vcfg.minimum_confidence, vcfg.review_confidence)
@@ -297,6 +319,7 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         "qa": counts([q.validation.status for q in qa.questions if q.validation]),
         "events_verified_now": n_verified,
         "verifier": verifier.name,
+        "verify_workers": v_workers,
     }
     validated = ValidatedVideo(video_id=ctx.video_id, duration=duration, scenes=v_scenes, events=v_events, relations=v_relations, qa=qa.questions, summary=summary)
     out = ctx.paths.validated_file(ctx.video_id)

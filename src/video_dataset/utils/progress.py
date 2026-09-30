@@ -9,6 +9,7 @@ shows which process is running and how far along it is - without flooding the lo
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any
 
@@ -64,6 +65,7 @@ class ProgressLog:
         self.last_log = 0.0
         self.done = 0.0
         self.finished = False
+        self._lock = threading.Lock()  # worker threads may call update()/step()
 
     def _fmt_count(self, value: float) -> str:
         if self.unit == "s":
@@ -86,18 +88,22 @@ class ProgressLog:
         return " ".join(parts)
 
     def update(self, done: float, extra: str = "", force: bool = False) -> None:
-        self.done = float(done)
-        now = time.time()
-        if not force:
-            if self.done < self.min_items:
-                return
-            if now - self.last_log < self.every:
-                return
-        self.last_log = now
-        self.log.log(self.level, self._line(extra))
+        with self._lock:
+            self.done = float(done)
+            now = time.time()
+            if not force:
+                if self.done < self.min_items:
+                    return
+                if now - self.last_log < self.every:
+                    return
+            self.last_log = now
+            line = self._line(extra)
+        self.log.log(self.level, line)
 
     def step(self, n: float = 1, extra: str = "") -> None:
-        self.update(self.done + n, extra)
+        with self._lock:
+            done = self.done + n
+        self.update(done, extra)
 
     def finish(self, extra: str = "") -> None:
         if self.finished:

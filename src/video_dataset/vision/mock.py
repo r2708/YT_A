@@ -28,6 +28,7 @@ class MockVisionAnalyzer(VisionAnalyzer):
     name = "mock"
     model = "mock-vlm"
     supports_verification = True
+    parallel_safe = True
 
     def analyze_frame(self, frame: Frame, context: AnalysisContext) -> FrameAnalysis:
         idx = int(frame.scene_id.split("_")[-1]) - 1
