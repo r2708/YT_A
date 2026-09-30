@@ -27,7 +27,7 @@ download:
   allowed_domains: []      # e.g. [youtube.com, youtu.be]; empty = any http(s) site yt-dlp supports
 
 limits:
-  max_duration_seconds: 7200   # 2 h; longer videos are rejected before download (null = no limit)
+  max_duration_seconds: 7200000   # No limit - accept any video duration (was: 7200 = 2h)
   max_file_size_gb: null       # reject downloads whose reported size is above this (null = no limit)
   min_free_disk_gb: 5          # DOWNLOAD / PREPROCESS / FRAME_EXTRACTION refuse to start below this
   disk_check_stages: [DOWNLOAD, PREPROCESS, FRAME_EXTRACTION]
@@ -202,8 +202,8 @@ export:
   merge_existing: true     # rebuilding final/ keeps records of earlier videos whose per_video/ export is gone
 
 upload:
-  provider: none           # none | huggingface - upload final/ automatically once it reaches threshold_mb
-  repo_id: null            # "<user-or-org>/<dataset-name>"; created (private) on first upload if missing
+  provider: huggingface    # none | huggingface - upload final/ automatically once it reaches threshold_mb
+  repo_id: r2708/temporal-video-qa-dataset  # "<user-or-org>/<dataset-name>"; created (private) on first upload if missing
   repo_type: dataset
   private: true
   token_env: HF_TOKEN      # write token read from the environment / .env; never put it in this file

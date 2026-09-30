@@ -10,6 +10,70 @@ validates and de-duplicates everything, and exports JSONL + Parquet datasets. Pr
 checkpointed per stage in SQLite, so a batch of 1,000 videos that dies at video 347 resumes
 exactly where it stopped.
 
+## 📦 Dataset Contents
+
+This dataset contains structured, temporally-grounded multimodal data extracted from YouTube videos:
+
+### **What's Included:**
+
+**🎬 Scene & Shot Analysis**
+- Shot boundaries with transition detection (cuts, fades, dissolves)
+- Scene-level descriptions with environment, lighting, and composition details
+- Camera movement tracking (pans, tilts, zooms, tracking shots)
+- Visual style analysis (color grading, framing, perspective)
+
+**🖼️ Frame & Clip Data**
+- Intelligently sampled frames from each scene (motion-aware sampling)
+- Frame-level captions and visual descriptions
+- Per-scene video clips with exact temporal boundaries
+- Image measurements (brightness, contrast, dominant colors, sharpness)
+
+**🎤 Audio & Transcription**
+- Speech transcripts with word-level timestamps
+- Audio event detection (non-speech sounds, silence segments)
+- Speaker actions and dialogue attribution
+- Multi-language support with automatic language detection
+
+**📝 On-Screen Text (OCR)**
+- Detected text with spatial locations and confidence scores
+- Cross-frame text tracking (persistent overlays, titles, captions)
+- Distinction between static overlays (watermarks) and dynamic text
+
+**⏱️ Temporal Events & Relations**
+- Timeline of actions, appearances, state changes, and camera movements
+- Temporal relations between events (BEFORE, DURING, OVERLAPS, CAUSES, etc.)
+- Long-range event connections across multiple scenes
+- Speech and text events synchronized with visual events
+
+**❓ Question-Answer Pairs**
+- Evidence-grounded temporal QA (timestamp, duration, ordering, localization)
+- Multi-event reasoning questions spanning multiple scenes
+- Before/after and state-change questions
+- Long-range reasoning for events separated by time
+
+**✅ Quality Metadata**
+- Confidence scores for all detected elements
+- Quality assessments (grounding, temporal accuracy, description quality)
+- Validation status (accepted, review, rejected)
+- Deduplication flags and similarity tracking
+
+### **Export Formats:**
+
+- **JSONL** - One JSON object per line (frames, clips, scenes, events, QA)
+- **Parquet** - Columnar format for efficient querying and analysis
+- **Combined dataset.jsonl** - All record types in a single file
+- **Per-type files** - Separate files for each record type (frames.jsonl, scenes.jsonl, etc.)
+
+### **Use Cases:**
+
+- Training video-language models (VLMs)
+- Video understanding and temporal reasoning
+- Action recognition and event detection
+- Video captioning and description generation
+- Video question-answering systems
+- Multi-modal retrieval and search
+- Long-form video comprehension
+
 ```
 URL -> DOWNLOAD -> PREPROCESS -> SCENE_DETECTION -> FRAME_EXTRACTION -> AUDIO -> TRANSCRIPTION
     -> OCR -> VISION_ANALYSIS -> TEMPORAL_ANALYSIS -> QA_GENERATION -> VALIDATION -> EXPORT

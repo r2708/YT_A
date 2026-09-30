@@ -15,6 +15,6 @@ pipeline:
     - EXPORT
   stage_retries: 1              # automatic retries of a failed stage within one run
   continue_on_error: true       # a failing video never stops the batch
-  workers: 1                    # parallel videos for CPU-bound stages (download..OCR)
-  model_stages_sequential: true # model stages run one video at a time so models load once
+  workers: 8                   # parallel videos for CPU-bound stages (download..OCR)
+  model_stages_sequential: false # model stages run one video at a time so models load once
   stage_timeout_seconds: null
