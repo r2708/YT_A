@@ -1,61 +1,25 @@
 ---
+license: mit
+task_categories:
+- video-classification
+- question-answering
+- text-generation
+- visual-question-answering
 language:
 - en
-license: mit
-multimodality:
-- video
-- text
-- image
-size_categories:
-- 1K<n<10K
-task_categories:
-- question-answering
-- video-classification
-- image-to-text
-- visual-question-answering
-task_ids:
-- visual-question-answering
-- image-captioning
-- extractive-qa
-pretty_name: Temporal Video QA Dataset
 tags:
-- video-understanding
+- video
 - temporal-reasoning
 - multimodal
-- video-qa
+- question-answering
 - video-language
 - youtube
-- event-detection
-- scene-understanding
-dataset_info:
-  features:
-  - name: question_id
-    dtype: string
-  - name: video_id
-    dtype: string
-  - name: question
-    dtype: string
-  - name: answer
-    dtype: string
-  - name: type
-    dtype: string
-  - name: evidence
-    dtype: string
-  - name: confidence
-    dtype: float64
-  - name: difficulty
-    dtype: string
-  splits:
-  - name: train
-    num_examples: 3314
-configs:
-- config_name: default
-  data_files:
-  - split: train
-    path: "*.jsonl"
+pretty_name: YouTube Video Dataset
+size_categories:
+- 1K<n<10K
 ---
 
-# Temporal Video QA Dataset
+# YouTube Video Dataset
 
 A temporally-grounded, multimodal dataset extracted from YouTube videos for training video-language models, temporal reasoning systems, and video question-answering models.
 
@@ -229,8 +193,8 @@ Dataset sourced from public YouTube videos. Please respect original content lice
 If you use this dataset, please cite:
 
 ```bibtex
-@dataset{temporal_video_qa_dataset,
-  title={Temporal Video QA Dataset},
+@dataset{youtube_video_dataset,
+  title={YouTube Video Dataset},
   author={raj270898},
   year={2026},
   publisher={Hugging Face},

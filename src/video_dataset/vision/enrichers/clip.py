@@ -23,6 +23,11 @@ LABEL_SETS: dict[str, dict[str, str]] = {
 }
 
 
+def _as_tensor(feats):  # type: ignore[no-untyped-def]
+    """transformers>=5 returns BaseModelOutputWithPooling from get_*_features; 4.x returns a tensor."""
+    return getattr(feats, "pooler_output", feats)
+
+
 class CLIPZeroShotEnricher:
     name = "clip"
 
@@ -43,7 +48,7 @@ class CLIPZeroShotEnricher:
         if key not in self._text_cache:
             inputs = self.processor(text=prompts, return_tensors="pt", padding=True).to(self.device)
             with self.torch.no_grad():
-                feats = self.model.get_text_features(**inputs)
+                feats = _as_tensor(self.model.get_text_features(**inputs))
             self._text_cache[key] = feats / feats.norm(dim=-1, keepdim=True)
         return self._text_cache[key]
 
@@ -58,7 +63,7 @@ class CLIPZeroShotEnricher:
         if self.dtype != self.torch.float32:
             inputs["pixel_values"] = inputs["pixel_values"].to(self.dtype)
         with self.torch.no_grad():
-            img = self.model.get_image_features(**inputs)
+            img = _as_tensor(self.model.get_image_features(**inputs))
         img = (img / img.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
         img = img / img.norm(dim=-1, keepdim=True)
         out: dict[str, Any] = {"model": self.model_name, "frames": len(chosen), "attributes": {}}
