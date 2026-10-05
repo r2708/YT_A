@@ -491,6 +491,86 @@ def upload(
 
 
 @app.command()
+def reannotate(
+    shards: Annotated[list[str] | None, typer.Argument(help="Local shard directories (default: data/final when none and --from-hub is not set)")] = None,
+    from_hub: Annotated[bool, typer.Option("--from-hub", help="Download the uploaded shards from upload.repo_id first")] = False,
+    only: Annotated[str | None, typer.Option("--only", help="Comma-separated shard names to process, e.g. shard_0001,shard_0002")] = None,
+    work_dir: Annotated[str | None, typer.Option("--work-dir", help="Where downloaded shards are stored (default data/reannotate)")] = None,
+    output: Annotated[str | None, typer.Option("--output", "-o", help="Write the rewritten shard(s) here instead of in place (one sub-folder per shard)")] = None,
+    push: Annotated[bool, typer.Option("--push", help="Upload each rewritten shard back to the Hub in place (needs a write token)")] = False,
+    update_card: Annotated[bool, typer.Option("--update-card", help="Also overwrite README.md on the Hub with the current dataset card")] = False,
+    no_negatives: Annotated[bool, typer.Option("--no-negatives", help="Skip rebuilding hard negatives")] = False,
+    config: ConfigOpt = None,
+    set_: SetOpt = None,
+) -> None:
+    """Upgrade already exported shards to the current schema and add split / tier / subsets / hard negatives / Parquet
+    without re-running the pipeline. Nothing is pushed to the Hub unless --push is given."""
+    from video_dataset.dataset.reannotate import (
+        download_shard,
+        hub_token,
+        list_hub_shards,
+        push_shard,
+        reannotate_shard,
+        update_dataset_card,
+    )
+
+    _apply_local_options(config, set_)
+    cfg = _config()
+    token = hub_token(cfg)
+    wanted = {x.strip() for x in only.split(",") if x.strip()} if only else None
+    targets: list[tuple[Path, str | None]] = []  # (local dir, path_in_repo)
+    if from_hub:
+        if not token:
+            console.print(f"[red]no Hugging Face token: set {cfg.upload.token_env or 'HF_TOKEN'} in the environment or .env (a read token is enough without --push)[/red]")
+            raise typer.Exit(1)
+        work = Path(work_dir) if work_dir else cfg.data_dir / "reannotate"
+        remote = list_hub_shards(cfg, token)
+        if not remote:
+            console.print(f"[yellow]no shard_* folders found in {cfg.upload.repo_id}[/yellow]")
+            raise typer.Exit(1)
+        for path_in_repo in remote:
+            if wanted and Path(path_in_repo).name not in wanted:
+                continue
+            console.print(f"downloading {cfg.upload.repo_id}/{path_in_repo} -> {work / path_in_repo}")
+            targets.append((download_shard(cfg, path_in_repo, work, token), path_in_repo))
+    else:
+        dirs = [Path(x) for x in shards] if shards else [cfg.export_dir]
+        for d in dirs:
+            if wanted and d.name not in wanted:
+                continue
+            targets.append((d, d.name if d.name.startswith("shard_") else None))
+    if not targets:
+        console.print("nothing to do")
+        raise typer.Exit(1)
+    if push and not token:
+        console.print(f"[red]--push needs a *write* token in {cfg.upload.token_env or 'HF_TOKEN'}[/red]")
+        raise typer.Exit(1)
+
+    t = Table(title="re-annotated shards")
+    for col in ("shard", "videos", "records", "splits", "scene tiers", "QA tiers", "hard negatives", "cinematic scenes", "output"):
+        t.add_column(col)
+    for local, path_in_repo in targets:
+        out_dir = (Path(output) / local.name) if output else None
+        summary = reannotate_shard(local, cfg, out_dir, rebuild_negatives=not no_negatives)
+        t.add_row(
+            local.name, str(summary["videos"]), f"{summary['records_in']:,}", json.dumps(summary["splits"]), json.dumps(summary["tiers"]),
+            json.dumps(summary["qa_tiers"]), json.dumps(summary["hard_negatives"]), str(summary["cinematic"].get("cinematic_scenes", 0)), summary["output"],
+        )
+        if push:
+            if not path_in_repo:
+                console.print(f"[yellow]{local}: not a shard_NNNN folder, cannot tell where it lives on the Hub - skipped push[/yellow]")
+                continue
+            url = push_shard(cfg, Path(summary["output"]), path_in_repo, token or "")
+            console.print(f"pushed {path_in_repo}: {url}")
+    console.print(t)
+    if update_card:
+        if not token:
+            console.print("[red]--update-card needs a write token[/red]")
+            raise typer.Exit(1)
+        console.print(f"dataset card updated: {update_dataset_card(cfg, token)}")
+
+
+@app.command()
 def package(
     output: Annotated[str, typer.Option("--output", "-o", help="Zip file to write")] = "data/final/dataset_bundle.zip",
     include_media: Annotated[bool, typer.Option("--include-media/--no-media", help="Also bundle every referenced frame and clip")] = False,

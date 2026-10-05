@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from video_dataset.utils.logging import get_logger
+from video_dataset.vision.subject_motion import normalized_box, position_label, scale_class
 
 log = get_logger("vision.yolo")
 
@@ -34,22 +35,34 @@ def aggregate_detections(per_frame: list[list[dict[str, Any]]]) -> list[dict[str
 
     ``count`` is the largest number of simultaneous instances seen in a single frame (not the sum
     over frames), ``confidence`` the mean detector score, ``frame_fraction`` the share of analysed
-    frames in which the class appears, ``location`` the most frequent coarse position.
+    frames in which the class appears, ``location`` the most frequent coarse position. When the
+    detections carry ``frame_size``, the largest box of the class in each frame also yields the
+    composition fields ``center`` [cx, cy], ``area_fraction``, ``scale`` and ``position`` (3x3 grid).
     """
     if not per_frame:
         return []
     by_name: dict[str, dict[str, Any]] = {}
     for fi, dets in enumerate(per_frame):
         counts = Counter(d["name"] for d in dets)
+        largest: dict[str, tuple[float, float, float]] = {}
         for d in dets:
-            entry = by_name.setdefault(d["name"], {"confs": [], "count": 0, "frames": set(), "locations": Counter()})
+            entry = by_name.setdefault(d["name"], {"confs": [], "count": 0, "frames": set(), "locations": Counter(), "boxes": []})
             entry["confs"].append(float(d["confidence"]))
             entry["count"] = max(entry["count"], counts[d["name"]])
             entry["frames"].add(fi)
             if d.get("location"):
                 entry["locations"][d["location"]] += 1
+            nb = normalized_box(d)
+            if nb is not None and (d["name"] not in largest or nb[2] > largest[d["name"]][2]):
+                largest[d["name"]] = nb
+        for name, nb in largest.items():
+            by_name[name]["boxes"].append(nb)
     out = []
     for name, e in by_name.items():
+        boxes = e["boxes"]
+        cx = sum(b[0] for b in boxes) / len(boxes) if boxes else None
+        cy = sum(b[1] for b in boxes) / len(boxes) if boxes else None
+        area = sum(b[2] for b in boxes) / len(boxes) if boxes else None
         out.append(
             {
                 "name": name,
@@ -59,6 +72,10 @@ def aggregate_detections(per_frame: list[list[dict[str, Any]]]) -> list[dict[str
                 "frame_fraction": round(len(e["frames"]) / len(per_frame), 3),
                 "location": e["locations"].most_common(1)[0][0] if e["locations"] else None,
                 "detections": len(e["confs"]),
+                "center": [round(cx, 4), round(cy, 4)] if cx is not None and cy is not None else None,
+                "area_fraction": round(area, 4) if area is not None else None,
+                "scale": scale_class(area) if area is not None else None,
+                "position": position_label(cx, cy) if cx is not None and cy is not None else None,
             }
         )
     out.sort(key=lambda o: (-o["frame_fraction"], -o["detections"], -o["confidence"], o["name"]))
@@ -110,6 +127,7 @@ class YOLODetector:
                             "name": str(res.names[int(box.cls[0])]),
                             "confidence": round(conf, 3),
                             "bbox": bbox,
+                            "frame_size": [int(w), int(h)],
                             "location": bbox_location(bbox, w, h),
                         }
                     )

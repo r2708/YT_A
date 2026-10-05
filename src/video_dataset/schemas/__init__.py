@@ -1,6 +1,7 @@
 """Pydantic schemas for every artifact the pipeline produces."""
 
 from video_dataset.schemas.common import BaseSchema, ConfidenceSource, Provenance, TimeSpan, utc_now_iso
+from video_dataset.schemas.curation import HardNegative, Split, Tier
 from video_dataset.schemas.dataset import (
     ClipCaptionRecord,
     EventRecord,
@@ -58,6 +59,7 @@ from video_dataset.schemas.vision import (
     SceneAnalysis,
     Setting,
     ShotType,
+    SubjectMotion,
     VerificationResult,
     VerificationVerdict,
     VisionResult,
@@ -89,6 +91,7 @@ __all__ = [
     "FrameAnalysis",
     "FrameCaptionRecord",
     "FrameSamplingResult",
+    "HardNegative",
     "Measurements",
     "MediaInfo",
     "OCRDetection",
@@ -112,7 +115,10 @@ __all__ = [
     "Setting",
     "ShotType",
     "SourceType",
+    "Split",
+    "SubjectMotion",
     "TemporalRelation",
+    "Tier",
     "TimeSpan",
     "Timeline",
     "Transcript",

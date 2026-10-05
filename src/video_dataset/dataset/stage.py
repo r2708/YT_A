@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from video_dataset.dataset.builders import DatasetBuilder
-from video_dataset.dataset.export import write_jsonl_files
+from video_dataset.dataset.curation import annotate_records
+from video_dataset.dataset.export import upgrade_records, write_jsonl_files
 from video_dataset.pipeline.context import StageOutput, VideoContext
 from video_dataset.schemas.ocr import OCRResult
 from video_dataset.schemas.scene import FrameSamplingResult, SceneDetectionResult
@@ -36,7 +37,10 @@ def export_stage(ctx: VideoContext) -> StageOutput:
     transcript = _load(ctx.paths.transcript_file(ctx.video_id), Transcript)
     ocr = _load(ctx.paths.ocr_file(ctx.video_id), OCRResult)
 
-    builder = DatasetBuilder(cfg.export.include_review, cfg.export.include_rejected, ctx.config.data_dir if cfg.export.relative_paths else None)
+    builder = DatasetBuilder(
+        cfg.export.include_review, cfg.export.include_rejected, ctx.config.data_dir if cfg.export.relative_paths else None,
+        hard_negatives=bool(cfg.export.hard_negatives), negatives_per_record=int(cfg.export.hard_negatives_per_record), seed=int(cfg.qa.seed),
+    )
     temporal_qa, long_qa = builder.qa(validated)
     records: dict[str, list[Any]] = {
         "frames": builder.frames(validated, sampling.frames, ocr),
@@ -47,14 +51,18 @@ def export_stage(ctx: VideoContext) -> StageOutput:
         "long_video_qa": long_qa,
         "video_descriptions": builder.video_descriptions(validated, scenes, ctx.metadata.title),
     }
+    rows = upgrade_records(records)  # plain dicts with record_type; split / tier / subsets filled below
+    curation = annotate_records(rows, cfg.export)
     out_dir = per_video_export_dir(ctx)
-    counts = write_jsonl_files(records, out_dir)
+    counts = write_jsonl_files(rows, out_dir)
     manifest = {
         "video_id": ctx.video_id,
         "title": ctx.metadata.title,
         "url": ctx.metadata.url,
         "duration": ctx.duration,
         "counts": counts,
+        "split": next((r.get("split") for rs in rows.values() for r in rs if r.get("split")), None),
+        "curation": curation,
         "validation_summary": validated.summary,
         "transcript_segments": len(transcript.segments) if transcript else 0,
         "ocr_tracks": len(ocr.tracks) if ocr else 0,

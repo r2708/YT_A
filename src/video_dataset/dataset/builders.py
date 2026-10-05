@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import random
 import re
 from pathlib import Path
 from typing import Any
 
+from video_dataset.dataset.negatives import caption_hard_negatives, qa_hard_negatives
 from video_dataset.schemas.common import ConfidenceSource
 from video_dataset.schemas.dataset import (
     ClipCaptionRecord,
@@ -42,10 +44,30 @@ def _rel(path: str | None, base: Path | None) -> str | None:
 _LIGHT_NUMBERS = re.compile(r"\s*\([^)]*\)")  # "dim overall brightness (mean 56/255)" -> "dim overall brightness"
 
 class DatasetBuilder:
-    def __init__(self, include_review: bool = True, include_rejected: bool = False, path_base: Path | None = None):
+    def __init__(
+        self,
+        include_review: bool = True,
+        include_rejected: bool = False,
+        path_base: Path | None = None,
+        hard_negatives: bool = True,
+        negatives_per_record: int = 3,
+        seed: int = 1234,
+    ):
         self.include_review = include_review
         self.include_rejected = include_rejected
         self.path_base = path_base
+        self.hard_negatives = hard_negatives
+        self.negatives_per_record = max(0, int(negatives_per_record))
+        self.seed = seed
+
+    def _rng(self, video_id: str, salt: str) -> random.Random:
+        return random.Random(f"{self.seed}:{video_id}:{salt}")
+
+    def _caption_negatives(self, a: SceneAnalysis, kept: list[SceneAnalysis]):  # type: ignore[no-untyped-def]
+        if not self.hard_negatives or not self.negatives_per_record:
+            return []
+        # one seed per shot, so the scene record and its clip record carry identical negatives
+        return caption_hard_negatives(a, kept, self._rng(a.video_id, f"caption:{a.scene_id}"), self.negatives_per_record)
 
     def _keep(self, v: ValidationInfo | None) -> bool:
         if v is None:
@@ -111,6 +133,7 @@ class DatasetBuilder:
     def clips(self, validated: ValidatedVideo, clips: list[Clip], transcript: Transcript | None) -> list[ClipCaptionRecord]:
         out: list[ClipCaptionRecord] = []
         by_scene = {vs.analysis.scene_id: vs for vs in validated.scenes}
+        kept = [vs.analysis for vs in validated.scenes if self._keep(vs.validation) and vs.analysis.summary]
         for c in clips:
             vs = by_scene.get(c.scene_id)
             if vs is None or not self._keep(vs.validation) or not vs.analysis.summary:
@@ -135,6 +158,7 @@ class DatasetBuilder:
                     description=desc,
                     actions=a.actions,
                     camera=a.camera,
+                    subject_motion=a.subject_motion,
                     transcript=(transcript.text_between(c.start_time, c.end_time) or None) if transcript else None,
                     frame_ids=c.frame_ids,
                     provider=a.provider,
@@ -142,6 +166,7 @@ class DatasetBuilder:
                     confidence_source=ConfidenceSource(a.confidence_source),
                     quality=vs.quality,
                     validation=vs.validation,
+                    hard_negatives=self._caption_negatives(a, kept),
                 )
             )
         return out
@@ -149,6 +174,7 @@ class DatasetBuilder:
     def scenes(self, validated: ValidatedVideo, clips: list[Clip], transcript: Transcript | None, ocr: OCRResult | None) -> list[SceneRecord]:
         out: list[SceneRecord] = []
         clip_by_scene = {c.scene_id: c for c in clips if not c.clip_id.count("_") > 1}
+        kept = [vs.analysis for vs in validated.scenes if self._keep(vs.validation) and vs.analysis.summary]
         for vs in validated.scenes:
             if not self._keep(vs.validation) or not vs.analysis.summary:
                 continue
@@ -158,8 +184,8 @@ class DatasetBuilder:
                     record_id=record_id("scene", validated.video_id, a.scene_id),
                     video_id=validated.video_id,
                     scene_id=a.scene_id,
-                    start=a.start_time,
-                    end=a.end_time,
+                    start_time=a.start_time,
+                    end_time=a.end_time,
                     duration=round(a.end_time - a.start_time, 3),
                     summary=a.summary or "",
                     environment=a.environment,
@@ -168,6 +194,7 @@ class DatasetBuilder:
                     people=a.people.model_dump(mode="json") if a.people else None,
                     actions=a.actions,
                     camera=a.camera,
+                    subject_motion=a.subject_motion,
                     visual_style=a.visual_style,
                     temporal_progression=a.temporal_progression,
                     transcript=(transcript.text_between(a.start_time, a.end_time) or None) if transcript else None,
@@ -180,6 +207,7 @@ class DatasetBuilder:
                     confidence_source=ConfidenceSource(a.confidence_source),
                     quality=vs.quality,
                     validation=vs.validation,
+                    hard_negatives=self._caption_negatives(a, kept),
                 )
             )
         return out
@@ -223,13 +251,15 @@ class DatasetBuilder:
     def qa(self, validated: ValidatedVideo) -> tuple[list[QARecord], list[QARecord]]:
         temporal: list[QARecord] = []
         long_video: list[QARecord] = []
+        events = [ve.event for ve in validated.events if self._keep(ve.validation)]
+        rng = self._rng(validated.video_id, "qa")
         for q in validated.qa:
             if not self._keep(q.validation):
                 continue
-            if q.is_long_range or q.type == QAType.LONG_RANGE or (q.type == QAType.MULTI_EVENT and len(q.evidence.scene_ids) >= 3):
-                long_video.append(q)
-            else:
-                temporal.append(q)
+            is_long = q.is_long_range or q.type == QAType.LONG_RANGE or (q.type == QAType.MULTI_EVENT and len(q.evidence.scene_ids) >= 3)
+            negatives = qa_hard_negatives(q, events, validated.duration, rng, self.negatives_per_record) if self.hard_negatives and self.negatives_per_record else []
+            rec = q.model_copy(update={"record_id": q.question_id, "record_type": "long_video_qa" if is_long else "temporal_qa", "hard_negatives": negatives})
+            (long_video if is_long else temporal).append(rec)
         return temporal, long_video
 
     def video_descriptions(self, validated: ValidatedVideo, scenes: list[Scene], title: str | None) -> list[VideoDescriptionRecord]:
@@ -311,14 +341,14 @@ class DatasetBuilder:
             if s.transition_in in ("cut", "fade"):
                 transitions.append(str(s.transition_in))
             confs.append(a.confidence)
-            shots.append({"scene_id": s.scene_id, "start": s.start_time, "end": s.end_time, "summary": a.summary, "camera": cam or None, "transition_in": str(s.transition_in), "temporal_progression": a.temporal_progression})
+            shots.append({"scene_id": s.scene_id, "start_time": s.start_time, "end_time": s.end_time, "summary": a.summary, "camera": cam or None, "transition_in": str(s.transition_in), "temporal_progression": a.temporal_progression})
         subject = ", ".join(k for k, _ in sorted(subjects.items(), key=lambda kv: -kv[1])[:3]) or None
         n_shots = len(group)
         cams: list[str] = [c for c in [self._summarize(cam_labels, n_shots)] if c]
         light_summary = self._summarize(light_labels, n_shots)
         temp_summary = self._summarize(light_temps, n_shots, max_items=2)
         lightings: list[str] = [x for x in [light_summary, temp_summary] if x]
-        progression = " ".join(f"Shot {i + 1} ({sh['start']:.1f}-{sh['end']:.1f}s): {sh['summary']}" + (f" {sentence(str(sh['temporal_progression']))}" if sh["temporal_progression"] else "") for i, sh in enumerate(shots))
+        progression = " ".join(f"Shot {i + 1} ({sh['start_time']:.1f}-{sh['end_time']:.1f}s): {sh['summary']}" + (f" {sentence(str(sh['temporal_progression']))}" if sh["temporal_progression"] else "") for i, sh in enumerate(shots))
         trans_text = None
         if transitions:
             trans_text = f"{len(transitions)} shot changes ({', '.join(sorted(set(transitions)))})"

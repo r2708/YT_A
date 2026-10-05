@@ -43,13 +43,14 @@ class FakeDetector:
         self.calls.append(list(paths))
         out = []
         for i, _p in enumerate(paths):
+            size = [160, 90]
             dets = [
-                {"name": "person", "confidence": 0.9, "bbox": [10, 10, 40, 80], "location": "left part of the frame"},
-                {"name": "person", "confidence": 0.7, "bbox": [60, 10, 90, 80], "location": "center of the frame"},
-                {"name": "car", "confidence": 0.8, "bbox": [120, 40, 158, 88], "location": "right part of the frame"},
+                {"name": "person", "confidence": 0.9, "bbox": [10, 10, 40, 80], "frame_size": size, "location": "left part of the frame"},
+                {"name": "person", "confidence": 0.7, "bbox": [60, 10, 90, 80], "frame_size": size, "location": "center of the frame"},
+                {"name": "car", "confidence": 0.8, "bbox": [120 - 30 * i, 40, 158 - 30 * i, 88], "frame_size": size, "location": "right part of the frame"},
             ]
             if i == 0:
-                dets.append({"name": "dog", "confidence": 0.55, "bbox": [70, 60, 90, 88], "location": "center of the frame"})
+                dets.append({"name": "dog", "confidence": 0.55, "bbox": [70, 60, 90, 88], "frame_size": size, "location": "center of the frame"})
             out.append(dets)
         return out
 
@@ -60,13 +61,15 @@ class FakeDetector:
 class FakeCLIP:
     name = "clip"
 
-    def __init__(self, model_name="fake-clip", device="cpu"):
+    def __init__(self, model_name="fake-clip", device="cpu", aesthetic=None):
         self.model_name = model_name
+        self.aesthetic = aesthetic
 
     def enrich(self, scene, frames):
         return {
             "model": self.model_name,
             "frames": len(frames),
+            "aesthetic": {"model": "fake-aesthetic", "mean": 5.25, "min": 5.0, "max": 5.5, "per_frame": [5.0, 5.5]},
             "attributes": {
                 "setting": {"label": "outdoor", "score": 0.93, "scores": {"indoor": 0.07, "outdoor": 0.93}},
                 "time_of_day": {"label": "day", "score": 0.6, "scores": {"day": 0.6, "night": 0.4}},  # below threshold
@@ -98,11 +101,17 @@ def test_bbox_location_and_aggregation():
     assert by["person"]["confidence"] == 0.8 and by["person"]["frame_fraction"] == 1.0
     assert by["dog"]["frame_fraction"] == 0.5 and by["dog"]["count"] == 1
     assert [o["name"] for o in agg][:2] == ["person", "car"]  # sorted by presence, then how often detected
+    # composition from the largest box per frame: the 30x70 person box at x=10..40 on a 160x90 frame
+    assert by["person"]["position"] == "left" and by["person"]["scale"] == "medium" and by["person"]["center"] == [0.1562, 0.5]
+    assert by["person"]["area_fraction"] == round(30 * 70 / (160 * 90), 4)
+    assert by["dog"]["scale"] == "small" and by["dog"]["position"] == "lower"
     assert aggregate_detections([]) == []
+    bare = aggregate_detections([[{"name": "cat", "confidence": 0.9, "bbox": [0, 0, 10, 10]}]])  # no frame size -> no composition
+    assert bare[0]["position"] is None and bare[0]["scale"] is None
 
 
 def test_cv_models_scene_analysis_is_grounded(tmp_path, fake_models):
-    cfg = load_config(None, {"vision.provider": "cv_models", "vision.yolo_model": "fake.pt", "vision.clip_model": "fake-clip", "vision.yolo_max_frames": "2"}).vision
+    cfg = load_config(None, {"vision.provider": "cv_models", "vision.yolo_model": "fake.pt", "vision.clip_model": "fake-clip", "vision.yolo_max_frames": "2", "vision.aesthetic": "false"}).vision
     analyzer = create_vision_analyzer(cfg, "cpu")
     assert analyzer.name == "cv_models" and analyzer.model == "fake.pt+fake-clip"
     assert not analyzer.is_generative and analyzer.detector.loaded
@@ -113,6 +122,9 @@ def test_cv_models_scene_analysis_is_grounded(tmp_path, fake_models):
     names = {o.name: o for o in a.objects}
     assert names["person"].count == 2 and names["person"].confidence_source == ConfidenceSource.DETECTOR_SCORE
     assert names["car"].location == "right part of the frame"
+    assert names["person"].position == "left" and names["person"].scale == "medium" and names["person"].frame_fraction == 1.0
+    assert a.subject_motion is None  # only two analysed frames: not enough to measure subject motion
+    assert a.measurements is not None and a.measurements.aesthetic_score == 5.25 and a.measurements.aesthetic_model == "fake-aesthetic"
     assert a.people is not None and a.people.count == 2
     assert a.confidence is not None and a.confidence_source == ConfidenceSource.DETECTOR_SCORE
     # CLIP labels above the threshold fill unknown fields; the 0.6 time-of-day score does not
@@ -127,8 +139,21 @@ def test_cv_models_scene_analysis_is_grounded(tmp_path, fake_models):
     type(a).model_validate(a.model_dump(mode="json"))
 
 
+def test_cv_models_measures_subject_motion_with_enough_frames(tmp_path, fake_models):
+    cfg = load_config(None, {"vision.provider": "cv_models", "vision.yolo_max_frames": "4", "vision.aesthetic": "false"}).vision
+    analyzer = cv_vision.CVVisionAnalyzer(cfg, "cpu")
+    scene, frames = _frames(tmp_path, 4)
+    a = analyzer.analyze_scene(scene, frames, AnalysisContext(video_id="vid_t"))
+    # the person boxes never move, the car box slides 30 px left per frame; the person is the larger subject
+    sm = a.subject_motion
+    assert sm is not None and sm.subject == "person" and sm.label == "static" and sm.n_frames == 4 and sm.camera_relation == "camera_static"
+    assert sm.confidence == 1.0 and str(sm.confidence_source) == "measurement"
+    assert a.summary and a.summary.endswith("The person stays in place.")
+    type(a).model_validate(a.model_dump(mode="json"))
+
+
 def test_cv_models_frame_analysis_and_missing_files(tmp_path, fake_models):
-    cfg = load_config(None, {"vision.provider": "cv_models"}).vision
+    cfg = load_config(None, {"vision.provider": "cv_models", "vision.aesthetic": "false"}).vision
     analyzer = cv_vision.CVVisionAnalyzer(cfg, "cpu")
     scene, frames = _frames(tmp_path, 1)
     fa = analyzer.analyze_frame(frames[0], AnalysisContext(video_id="vid_t"))
@@ -142,7 +167,7 @@ def test_cv_models_frame_analysis_and_missing_files(tmp_path, fake_models):
 def test_cv_models_without_clip_keeps_yolo(tmp_path, monkeypatch):
     monkeypatch.setattr(cv_vision, "YOLODetector", FakeDetector)
     monkeypatch.setattr(cv_vision, "CLIPZeroShotEnricher", BrokenCLIP)
-    cfg = load_config(None, {"vision.provider": "cv_models", "vision.yolo_model": "fake.pt"}).vision
+    cfg = load_config(None, {"vision.provider": "cv_models", "vision.yolo_model": "fake.pt", "vision.aesthetic": "false"}).vision
     analyzer = cv_vision.CVVisionAnalyzer(cfg, "cpu")
     assert analyzer.clip is None and analyzer.model == "fake.pt"
     scene, frames = _frames(tmp_path, 2)

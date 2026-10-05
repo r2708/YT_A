@@ -33,6 +33,7 @@ def test_config(tmp_path: Path):
         "transcription.provider": "mock",
         "audio_events.provider": "energy",
         "vision.provider": "heuristic",
+        "vision.aesthetic": "false",  # never fetch the aesthetic head in tests
         "ocr.provider": "rapidocr",
         "frame_sampling.extract_clips": "true",
         "frame_sampling.clip_codec": "libx264",

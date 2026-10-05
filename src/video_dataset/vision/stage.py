@@ -25,7 +25,7 @@ from video_dataset.utils.parallel import chunk_evenly, parallel_map, stage_worke
 from video_dataset.utils.progress import ProgressLog
 from video_dataset.vision.base import AnalysisContext, create_vision_analyzer, select_evenly
 from video_dataset.vision.enrichers.base import create_enrichers
-from video_dataset.vision.enrichers.clip import apply_clip_attributes
+from video_dataset.vision.enrichers.clip import apply_clip_aesthetic, apply_clip_attributes
 from video_dataset.vision.heuristic import HeuristicVisionAnalyzer
 from video_dataset.vision.measurements import measure_scene
 
@@ -122,6 +122,7 @@ def vision_stage(ctx: VideoContext) -> StageOutput:
 
         # Always attach measured signals; fill camera movement from optical flow when the model did not say.
         analysis.measurements = measured.measurements
+        apply_clip_aesthetic(analysis, analysis.enrichments.get("clip"))  # cv_models ran CLIP itself
         analysis.enrichments["measured_camera"] = measured.camera.model_dump(mode="json")
         if analysis.camera.movement == CameraMovement.UNKNOWN and measured.camera.movement != CameraMovement.UNKNOWN:
             analysis.camera.movement = measured.camera.movement
@@ -164,6 +165,7 @@ def vision_stage(ctx: VideoContext) -> StageOutput:
                 analysis.enrichments[enr.name] = data
                 if enr.name == "clip":
                     apply_clip_attributes(analysis, data)
+                    apply_clip_aesthetic(analysis, data)
             except Exception as exc:
                 log.warning("enricher %s failed on %s: %s", enr.name, scene.scene_id, str(exc)[:120])
 

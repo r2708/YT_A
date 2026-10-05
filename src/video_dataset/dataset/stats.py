@@ -17,6 +17,24 @@ def _status_counts(records: Iterable[dict[str, Any]]) -> dict[str, int]:
     return out
 
 
+def _field_counts(records: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for r in records:
+        v = r.get(key) if isinstance(r, dict) else None
+        k = str(v) if v is not None else "unassigned"
+        out[k] = out.get(k, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _split_videos(records: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    seen: dict[str, set[str]] = {}
+    for rows in records.values():
+        for r in rows:
+            if isinstance(r, dict) and r.get("video_id"):
+                seen.setdefault(str(r.get("split") or "unassigned"), set()).add(str(r["video_id"]))
+    return {k: len(v) for k, v in sorted(seen.items())}
+
+
 def compute_statistics(
     videos: list[dict[str, Any]],
     records: dict[str, list[dict[str, Any]]],
@@ -59,6 +77,11 @@ def compute_statistics(
         "video_descriptions": len(records.get("video_descriptions", [])),
         "validation": agg,
         "exported_status_counts": {name: _status_counts(recs) for name, recs in records.items()},
+        "videos_by_split": _split_videos(records),
+        "records_by_split": {name: _field_counts(recs, "split") for name, recs in records.items()},
+        "records_by_tier": {name: _field_counts(recs, "tier") for name, recs in records.items()},
+        "records_with_hard_negatives": {name: sum(1 for r in recs if isinstance(r, dict) and r.get("hard_negatives")) for name, recs in records.items() if name in ("scenes", "clips", "temporal_qa", "long_video_qa")},
+        "records_in_cinematic_subset": {name: sum(1 for r in recs if isinstance(r, dict) and "cinematic" in (r.get("subsets") or [])) for name, recs in records.items()},
     }
     if extra:
         stats.update(extra)
@@ -100,6 +123,24 @@ def format_statistics(stats: dict[str, Any]) -> str:
     row("Rejected", qa.get("rejected", 0))
     row("Needs review", qa.get("review", 0))
     row("Duplicates", qa.get("duplicate", 0))
+    splits = stats.get("videos_by_split") or {}
+    if splits:
+        lines.append("")
+        lines.append("Videos by split")
+        for name, n in splits.items():
+            row(f"  {name}", n)
+    tiers = (stats.get("records_by_tier") or {}).get("scenes") or {}
+    qa_tiers = (stats.get("records_by_tier") or {}).get("temporal_qa") or {}
+    if tiers or qa_tiers:
+        lines.append("")
+        lines.append("Tiers (scenes / temporal QA)")
+        for name in ("gold", "silver", "bronze", "unassigned"):
+            if tiers.get(name) or qa_tiers.get(name):
+                row(f"  {name}", f"{tiers.get(name, 0):,} / {qa_tiers.get(name, 0):,}")
+    cine = stats.get("records_in_cinematic_subset") or {}
+    if cine.get("scenes"):
+        lines.append("")
+        row("Cinematic scenes", cine.get("scenes", 0))
     files = stats.get("files") or {}
     if files:
         lines.append("")

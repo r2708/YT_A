@@ -20,9 +20,10 @@ def create_enrichers(cfg: VisionConfig, device: str) -> list[Enricher]:
     for name in cfg.enrichers or []:
         if name == "clip":
             try:
+                from video_dataset.vision.enrichers.aesthetic import head_from_config
                 from video_dataset.vision.enrichers.clip import CLIPZeroShotEnricher
 
-                out.append(CLIPZeroShotEnricher(cfg.clip_model, device))
+                out.append(CLIPZeroShotEnricher(cfg.clip_model, device, aesthetic=head_from_config(cfg)))
             except Exception as exc:
                 log.warning("CLIP enricher unavailable: %s", exc)
         else:

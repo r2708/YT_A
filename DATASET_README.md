@@ -64,22 +64,45 @@ This dataset contains structured, temporally-grounded multimodal data extracted 
 - Long-range reasoning for events separated by time
 
 **✅ Quality Metadata**
-- Confidence scores for all detected elements
+- Confidence scores for all detected elements, each with its provenance (`confidence_source`)
 - Quality assessments (grounding, temporal accuracy, description quality)
 - Validation status (accepted, review, rejected)
 - Deduplication flags and similarity tracking
 
+**🧭 Curation (every record)**
+- `split`: train / validation / test, assigned per source video so no video leaks across splits
+- `tier`: gold / silver / bronze from measured signals only, with `tier_reasons`
+- `subsets`: named subsets such as `cinematic` (also written to `cinematic/`)
+- `hard_negatives` on QA, scene and clip records: rule-built wrong answers / captions (swapped order, shifted time, wrong duration, opposite camera movement or lighting, caption of a measurably different shot)
+
+**🎥 Measured Composition & Motion** (`cv_models` provider)
+- Object position (3x3 grid), scale class and area fraction from detector boxes
+- Camera speed from optical flow; subject motion separated from camera motion (tracked / panned past / moves left ... / approaches)
+- Aesthetic score from the LAION aesthetic predictor on CLIP embeddings (~1..10)
+
 ## 📁 Files
 
-- **`temporal_qa.jsonl`** - Temporal question-answer pairs with evidence
-- **`long_video_qa.jsonl`** - Multi-scene reasoning questions
-- **`scenes.jsonl`** - Scene-level descriptions and analysis
-- **`frames.jsonl`** - Frame-level captions and metadata
-- **`clips.jsonl`** - Video clip descriptions
-- **`events.jsonl`** - Timeline events with temporal relations
-- **`video_descriptions.jsonl`** - Video-level descriptions
-- **`dataset.jsonl`** - All records combined (single file)
-- **`dataset.parquet`** - Parquet format for efficient querying
+Each record type comes as `<type>.parquet` (explicit schema, what loaders should read) and `<type>.jsonl` (same records, human readable).
+
+- **`temporal_qa`** - Temporal question-answer pairs with evidence and hard-negative answers
+- **`long_video_qa`** - Multi-scene reasoning questions
+- **`scenes`** - Scene-level descriptions and analysis
+- **`frames`** - Frame-level captions and metadata
+- **`clips`** - Video clip descriptions
+- **`events`** - Timeline events with temporal relations
+- **`video_descriptions`** - Video-level descriptions
+- **`dataset.jsonl`** - All records combined (single file, each line tagged with `record_type`)
+- **`dataset.parquet`** - One normalized row per record (text, answer, times, split, tier, payload JSON)
+- **`cinematic/`** - The cinematic subset in the same layout
+- **`splits.json`**, **`schemas.json`** - Video ids per split; JSON Schema of every record type
+
+```python
+from datasets import load_dataset
+qa = load_dataset("parquet", data_files="temporal_qa.parquet", split="train")
+train_qa = qa.filter(lambda r: r["split"] == "train" and r["tier"] != "bronze")
+```
+
+Read the Parquet files rather than the JSONL files with `load_dataset("json", ...)`: JSON type inference types a column that is null in one file as `null` and then cannot load another file where it is filled.
 
 ## 🎯 Use Cases
 
@@ -112,6 +135,7 @@ This dataset contains structured, temporally-grounded multimodal data extracted 
   },
   "difficulty": "medium",
   "confidence": 0.739,
+  "confidence_source": "derived_min",
   "quality": {
     "grounding": 1.0,
     "temporal_accuracy": 0.739,
@@ -121,7 +145,14 @@ This dataset contains structured, temporally-grounded multimodal data extracted 
   "validation": {
     "status": "review",
     "issues": ["low confidence evidence"]
-  }
+  },
+  "hard_negatives": [
+    {"text": "The speaker says 'In a world where we're surrounded by light'.", "kind": "other_event", "source_ids": ["event_0009"], "note": "happens at 21.4s, outside the evidence window 0.8-17.6s"}
+  ],
+  "split": "train",
+  "tier": "bronze",
+  "tier_reasons": ["status_review"],
+  "subsets": []
 }
 ```
 
@@ -130,10 +161,11 @@ This dataset contains structured, temporally-grounded multimodal data extracted 
 ```json
 {
   "record_id": "scene_0a3f9c2e8b71_scene_003",
+  "record_type": "scene",
   "video_id": "vid_0a3f9c2e8b71",
   "scene_id": "scene_003",
-  "start": 31.4,
-  "end": 48.9,
+  "start_time": 31.4,
+  "end_time": 48.9,
   "duration": 17.5,
   "summary": "A red sports car drives along a winding mountain road...",
   "environment": {
@@ -143,28 +175,41 @@ This dataset contains structured, temporally-grounded multimodal data extracted 
     "time_of_day": "day"
   },
   "objects": ["red sports car", "road", "trees"],
+  "object_details": [{"name": "car", "count": 1, "position": "center", "scale": "medium", "area_fraction": 0.12, "frame_fraction": 1.0, "confidence": 0.84, "confidence_source": "detector_score"}],
   "actions": ["car drives toward camera", "camera tracks vehicle"],
   "camera": {
     "shot_type": "wide",
     "camera_angle": "eye_level",
-    "movement": "tracking"
+    "movement": "tracking",
+    "speed": "moderate",
+    "tracked_subject": "car"
   },
+  "subject_motion": {"subject": "car", "label": "tracked_by_camera", "camera_relation": "tracked", "relative_velocity": [-0.17, 0.0], "n_frames": 6, "confidence": 0.9},
   "transcript": "We are entering the mountains now.",
   "measurements": {
     "brightness_mean": 141.2,
     "contrast": 0.41,
-    "motion_magnitude": 1.84
-  }
+    "motion_magnitude": 1.84,
+    "camera_speed": "moderate",
+    "aesthetic_score": 6.2
+  },
+  "split": "train",
+  "tier": "silver",
+  "tier_reasons": ["no_grounding_component"],
+  "subsets": ["cinematic"],
+  "hard_negatives": [{"text": "...the camera is static...", "kind": "attribute_swap", "source_ids": ["scene_003"], "note": "camera measured tracking, negative claims static"}]
 }
 ```
 
 ## 🔬 Data Quality
 
 All records include:
-- **Confidence scores** (0.5-1.0) for reliability assessment
+- **Confidence scores** with their provenance (`confidence_source`: verifier, measurement, detector score, ASR log-prob, ...)
 - **Validation status** (accepted/review/rejected)
 - **Evidence grounding** - All answers are backed by concrete evidence
 - **Quality metrics** - Grounding, temporal accuracy, description quality
+- **Tier** - gold (accepted, grounded, high quality), silver (accepted, measured quality >= 0.6), bronze (everything else exported); `tier_reasons` explains the gap
+- **Split** - per source video, so evaluation never sees scenes of a training video
 
 Questions are generated from timeline events (not hallucinated), ensuring high-quality, verifiable question-answer pairs.
 

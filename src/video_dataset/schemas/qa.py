@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import Field, model_validator
 
 from video_dataset.schemas.common import BaseSchema, ConfidenceSource, StrEnum
+from video_dataset.schemas.curation import HardNegative, Split, Tier
 from video_dataset.schemas.quality import QualityScore, ValidationInfo
 
 
@@ -47,6 +50,8 @@ class Evidence(BaseSchema):
 
 class QARecord(BaseSchema):
     question_id: str
+    record_id: str | None = None  # always equal to question_id; present so every exported record has the same key
+    record_type: str = "temporal_qa"  # temporal_qa | long_video_qa (set by the export builder)
     video_id: str
     type: QAType
     question: str
@@ -61,6 +66,18 @@ class QARecord(BaseSchema):
     is_long_range: bool = False
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
+    hard_negatives: list[HardNegative] = Field(default_factory=list)  # rule-built wrong answers (export only)
+    split: Split | None = None  # train / validation / test, assigned per source video
+    tier: Tier | None = None  # gold / silver / bronze, derived from validation + quality
+    tier_reasons: list[str] = Field(default_factory=list)
+    subsets: list[str] = Field(default_factory=list)  # e.g. ["cinematic"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_record_id(cls, data: Any) -> Any:
+        if isinstance(data, dict) and not data.get("record_id") and data.get("question_id"):
+            data = {**data, "record_id": data["question_id"]}
+        return data
 
 
 class QAResult(BaseSchema):

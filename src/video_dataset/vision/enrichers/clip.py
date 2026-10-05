@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from video_dataset.schemas.scene import Frame, Scene
-from video_dataset.schemas.vision import CameraAngle, SceneAnalysis, Setting, ShotType
+from video_dataset.schemas.vision import CameraAngle, Measurements, SceneAnalysis, Setting, ShotType
 from video_dataset.utils.device import torch_dtype
 from video_dataset.vision.base import select_evenly
+from video_dataset.vision.enrichers.aesthetic import AestheticHead
 
 LABEL_SETS: dict[str, dict[str, str]] = {
     "setting": {"indoor": "a photo taken indoors", "outdoor": "a photo taken outdoors"},
@@ -31,12 +32,13 @@ def _as_tensor(feats):  # type: ignore[no-untyped-def]
 class CLIPZeroShotEnricher:
     name = "clip"
 
-    def __init__(self, model_name: str, device: str = "cpu", max_frames: int = 3):
+    def __init__(self, model_name: str, device: str = "cpu", max_frames: int = 3, aesthetic: AestheticHead | None = None):
         import torch
         from transformers import CLIPModel, CLIPProcessor
 
         self.torch = torch
         self.device = device
+        self.aesthetic = aesthetic
         self.dtype = torch_dtype(device) if device != "cpu" else torch.float32
         self.model = CLIPModel.from_pretrained(model_name, dtype=self.dtype).to(device).eval()  # type: ignore[arg-type]
         self.processor = CLIPProcessor.from_pretrained(model_name)
@@ -64,9 +66,15 @@ class CLIPZeroShotEnricher:
             inputs["pixel_values"] = inputs["pixel_values"].to(self.dtype)
         with self.torch.no_grad():
             img = _as_tensor(self.model.get_image_features(**inputs))
-        img = (img / img.norm(dim=-1, keepdim=True)).mean(dim=0, keepdim=True)
+        per_frame = img / img.norm(dim=-1, keepdim=True)
+        img = per_frame.mean(dim=0, keepdim=True)
         img = img / img.norm(dim=-1, keepdim=True)
         out: dict[str, Any] = {"model": self.model_name, "frames": len(chosen), "attributes": {}}
+        if self.aesthetic is not None:
+            try:
+                out["aesthetic"] = self.aesthetic.summarize(per_frame.float().cpu().numpy())
+            except Exception as exc:  # pragma: no cover - head / model mismatch
+                out["aesthetic_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         for key, labels in LABEL_SETS.items():
             txt = self._text_features(key, list(labels.values()))
             probs = (100.0 * img.float() @ txt.float().T).softmax(dim=-1)[0].tolist()
@@ -101,6 +109,15 @@ def apply_clip_attributes(analysis: SceneAnalysis, enrichment: dict[str, Any] | 
         analysis.camera.camera_angle = CameraAngle.AERIAL
         if analysis.camera.is_aerial is None:
             analysis.camera.is_aerial = True
+
+
+def apply_clip_aesthetic(analysis: SceneAnalysis, enrichment: dict[str, Any] | None) -> None:
+    """Copy the aesthetic score of the CLIP enrichment into the scene measurements."""
+    aes = (enrichment or {}).get("aesthetic") or {}
+    if aes.get("mean") is None:
+        return
+    update = {"aesthetic_score": float(aes["mean"]), "aesthetic_model": aes.get("model")}
+    analysis.measurements = analysis.measurements.model_copy(update=update) if analysis.measurements is not None else Measurements(**update)
 
 
 def clip_phrase(enrichment: dict[str, Any] | None, min_score: float = 0.75) -> str:

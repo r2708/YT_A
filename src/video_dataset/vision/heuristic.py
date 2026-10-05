@@ -20,7 +20,7 @@ from video_dataset.schemas.vision import (
 )
 from video_dataset.vision.base import AnalysisContext, VisionAnalyzer
 from video_dataset.vision.measurements import measure_frame_file, measure_scene
-from video_dataset.vision.motion import MOVEMENT_PHRASES, dominant_motion
+from video_dataset.vision.motion import MOVEMENT_PHRASES, camera_speed, dominant_motion
 
 _MOTION_WORDS = {
     CameraMovement.PAN_LEFT: ("pan left", "pans left", "panning left"),
@@ -98,9 +98,19 @@ class HeuristicVisionAnalyzer(VisionAnalyzer):
         m = context.measurements or measure_scene([Path(f.frame_path) for f in frames], context.scan)
         label, consistency, mag = dominant_motion(context.scan, self.min_motion)
         camera = self.camera_annotation(context)
-        m = m.model_copy(update={"camera_motion_label": str(label) if label != CameraMovement.UNKNOWN else None, "camera_motion_consistency": round(consistency, 3) if label != CameraMovement.UNKNOWN else None, "motion_magnitude": m.motion_magnitude if m.motion_magnitude is not None else (round(mag, 4) if mag is not None else None)})
+        speed, speed_frac = camera_speed(context.scan, camera.movement)
+        camera.speed = speed
+        m = m.model_copy(update={
+            "camera_motion_label": str(label) if label != CameraMovement.UNKNOWN else None,
+            "camera_motion_consistency": round(consistency, 3) if label != CameraMovement.UNKNOWN else None,
+            "camera_speed": speed,
+            "camera_speed_fraction_per_second": speed_frac,
+            "motion_magnitude": m.motion_magnitude if m.motion_magnitude is not None else (round(mag, 4) if mag is not None else None),
+        })
 
         movement_phrase = MOVEMENT_PHRASES[camera.movement]
+        if speed and camera.movement not in (CameraMovement.STATIC, CameraMovement.UNKNOWN):
+            movement_phrase = f"{movement_phrase} at a {speed} pace"
         summary = (
             f"A {scene.duration:.1f}-second shot with {m.lighting_level or 'unmeasured'} lighting and {_palette_phrase(m)}; "
             f"{movement_phrase}, with {_motion_level(m.motion_magnitude)} on-screen motion."

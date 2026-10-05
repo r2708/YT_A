@@ -192,10 +192,11 @@ class HuggingFaceUploader:
 
 def dataset_card(cfg: UploadConfig, config: PipelineConfig) -> str:
     name = (cfg.repo_id or "dataset").split("/")[-1]
-    configs = "\n".join(
-        f"- config_name: {n}\n  data_files: \"{(cfg.path_in_repo.strip('/') + '/') if cfg.path_in_repo else ''}shard_*/{n}.jsonl\""
-        for n in DATASET_FILES
-    )
+    prefix = (cfg.path_in_repo.strip("/") + "/") if cfg.path_in_repo else ""
+    # Parquet carries an explicit schema: nullable columns load the same way in every shard. The JSONL
+    # files are kept for reading, but JSON type inference fails on columns that are null in one shard
+    # and filled in another, so the loader configs point at the Parquet files.
+    configs = "\n".join(f"- config_name: {n}\n  data_files: \"{prefix}shard_*/{n}.parquet\"" for n in DATASET_FILES)
     return f"""---
 pretty_name: {name}
 configs:
@@ -212,14 +213,20 @@ The dataset is uploaded in size-bounded shards. Every `shard_NNNN/` directory ho
 
 | file | content |
 |---|---|
-| `frames.jsonl` | one record per sampled frame (caption, measurements, OCR text) |
-| `clips.jsonl` | one record per scene clip |
-| `scenes.jsonl` | scene-level analysis (objects, people, actions, camera, setting) |
-| `events.jsonl` | timeline events with interval relations |
-| `temporal_qa.jsonl`, `long_video_qa.jsonl` | evidence-linked temporal question/answer pairs |
-| `video_descriptions.jsonl` | whole-video descriptions |
+| `frames.parquet` / `.jsonl` | one record per sampled frame (caption, measurements, OCR text) |
+| `clips.parquet` / `.jsonl` | one record per scene clip (+ subject motion, hard-negative captions) |
+| `scenes.parquet` / `.jsonl` | scene-level analysis (objects with position/scale, camera + speed, subject motion, aesthetic score) |
+| `events.parquet` / `.jsonl` | timeline events with interval relations |
+| `temporal_qa`, `long_video_qa` (`.parquet` / `.jsonl`) | evidence-linked temporal question/answer pairs with rule-built hard negatives |
+| `video_descriptions.parquet` / `.jsonl` | whole-video descriptions |
 | `dataset.jsonl`, `dataset.parquet` | every record of the shard (tagged with `record_type`) |
+| `cinematic/` | the cinematic subset in the same layout |
+| `splits.json`, `schemas.json` | train/validation/test video ids; JSON Schema of every record type |
 | `statistics.json`, `manifest.json` | shard statistics and the list of source videos |
+
+Every record carries `split` (train / validation / test, assigned per source video so no video
+leaks across splits), `tier` (gold / silver / bronze with `tier_reasons`) and `subsets`. Filter on
+them rather than re-splitting by record.
 | `per_video/<video_id>/` | the same records grouped by source video |
 {"| `frames/`, `clips/` | the JPEG frames and MP4 clips the records reference (paths are relative to the shard root) |" if cfg.include_media else "| *(media)* | frames and clips are not included; `frame_path` / `clip_path` are relative to the producer's data directory |"}
 

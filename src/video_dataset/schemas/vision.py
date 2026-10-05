@@ -69,6 +69,12 @@ class ObjectAnnotation(BaseSchema):
     count: int | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
+    # composition, measured from detector boxes (None when the provider reports no boxes)
+    position: str | None = None  # 3x3 grid cell of the mean box centre: "center", "upper-left", "lower-right", ...
+    center: list[float] | None = None  # mean normalised box centre [cx, cy] in 0..1
+    area_fraction: float | None = Field(default=None, ge=0, le=1)  # mean box area / frame area
+    scale: str | None = None  # tiny | small | medium | large | dominant (from area_fraction)
+    frame_fraction: float | None = Field(default=None, ge=0, le=1)  # share of analysed frames the object appears in
 
 
 class PersonAnnotation(BaseSchema):
@@ -88,6 +94,8 @@ class CameraAnnotation(BaseSchema):
     zoom: str | None = None
     stability: str | None = None  # "static" | "handheld" | "stabilized" | None
     is_aerial: bool | None = None
+    speed: str | None = None  # slow | moderate | fast - measured from optical flow (fraction of the frame per second)
+    tracked_subject: str | None = None  # set when movement == tracking: the detected object the camera follows
     confidence: float | None = Field(default=None, ge=0, le=1)
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
 
@@ -118,8 +126,34 @@ class Measurements(BaseSchema):
     motion_magnitude: float | None = None  # mean optical flow magnitude (analysis px/frame)
     camera_motion_label: str | None = None  # from optical flow interpretation
     camera_motion_consistency: float | None = None  # 0..1 fraction of samples agreeing with label
+    camera_speed: str | None = None  # slow | moderate | fast (None when the camera is static / unmeasured)
+    camera_speed_fraction_per_second: float | None = None  # mean global flow as fraction of frame width per second
     brightness_trend: str | None = None  # "brightening" | "darkening" | "stable"
     lighting_level: str | None = None  # dark | dim | normal | bright
+    aesthetic_score: float | None = None  # LAION aesthetic predictor on CLIP embeddings, ~1 (poor) .. 10 (excellent)
+    aesthetic_model: str | None = None  # which linear head produced it, e.g. "laion/sa_0_4_vit_b_32_linear"
+
+
+class SubjectMotion(BaseSchema):
+    """Motion of the main detected subject, separated from the camera motion.
+
+    Box velocity is measured in frame coordinates (fraction of the frame per second) from detector
+    boxes across the analysed frames; camera velocity is the global optical-flow translation in the
+    same units. ``relative_velocity`` = box velocity - camera-induced velocity is the subject's own
+    motion. When the subject stays put in the frame while the background streams, the camera is
+    tracking it.
+    """
+
+    subject: str  # detected class name, e.g. "person"
+    label: str  # static | moves_left | moves_right | moves_up | moves_down | approaches | recedes | tracked_by_camera | panned_past
+    camera_relation: str  # camera_static | tracked | moves_with_camera | moves_against_camera | independent
+    box_velocity: list[float] = Field(default_factory=list)  # [vx, vy] fraction of frame / s, frame coordinates
+    camera_velocity: list[float] = Field(default_factory=list)  # [vx, vy] apparent background motion, same units
+    relative_velocity: list[float] = Field(default_factory=list)  # box - camera
+    scale_change_per_second: float | None = None  # d(area_fraction)/dt; > 0 grows (approaches), < 0 shrinks
+    n_frames: int = 0  # analysed frames in which the subject was detected
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    confidence_source: ConfidenceSource = ConfidenceSource.MEASUREMENT
 
 
 class FrameAnalysis(BaseSchema):
@@ -166,6 +200,7 @@ class SceneAnalysis(BaseSchema):
     people: PersonAnnotation | None = None
     actions: list[str] = Field(default_factory=list)
     camera: CameraAnnotation = Field(default_factory=CameraAnnotation)
+    subject_motion: SubjectMotion | None = None  # measured from detector boxes + optical flow (cv_models)
     visual_style: VisualStyle = Field(default_factory=VisualStyle)
     temporal_progression: str | None = None  # what changes from the start to the end of the scene
     frame_analyses: list[FrameAnalysis] = Field(default_factory=list)

@@ -1,4 +1,15 @@
-"""Merge per-video exports into the final dataset files: <final>/*.jsonl, dataset.parquet, statistics.json."""
+"""Merge per-video exports into the final dataset files.
+
+<final>/<type>.jsonl + dataset.jsonl   human-readable records (every type shares the same envelope)
+<final>/<type>.parquet                 the same records with an explicit, model-derived schema
+<final>/dataset.parquet                one normalised row per record (payload column = full JSON)
+<final>/cinematic/...                  the cinematic subset (same layout, when enabled)
+<final>/splits.json, schemas.json, statistics.json, manifest.json
+
+Every record is passed through the current schema (``upgrade_records``) and then annotated with
+split / tier / subsets (``annotate_records``), so records kept from earlier final files end up in
+exactly the same shape as fresh ones.
+"""
 
 from __future__ import annotations
 
@@ -7,13 +18,20 @@ from pathlib import Path
 from typing import Any
 
 from video_dataset.config import PipelineConfig
+from video_dataset.dataset.curation import annotate_records, split_manifest, subset_records
 from video_dataset.dataset.export import (
+    CINEMATIC_DIR,
     COMBINED_FILE,
     DATASET_FILES,
     RECORD_TYPES,
+    SCHEMA_FILE,
+    SPLITS_FILE,
+    upgrade_records,
     write_combined_jsonl,
     write_jsonl_files,
     write_parquet,
+    write_schema_file,
+    write_typed_parquet_files,
 )
 from video_dataset.dataset.stats import compute_statistics
 from video_dataset.storage.state_db import StateDB
@@ -74,6 +92,25 @@ def merge_records(
     return merged
 
 
+def _write_dataset_files(records: dict[str, list[dict[str, Any]]], out_dir: Path, config: PipelineConfig) -> tuple[dict[str, int], int, dict[str, int], int]:
+    """(per-type jsonl counts, combined rows, per-type parquet counts, normalised parquet rows)."""
+    counts: dict[str, int] = {name: len(records.get(name, [])) for name in DATASET_FILES}
+    combined_rows = 0
+    typed_counts: dict[str, int] = {}
+    parquet_rows = 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if "jsonl" in config.export.formats:
+        if config.export.per_type_jsonl:
+            counts = write_jsonl_files(records, out_dir)
+        if config.export.combined_jsonl:
+            combined_rows = write_combined_jsonl(records, out_dir / COMBINED_FILE)
+    if "parquet" in config.export.formats:
+        if config.export.per_type_parquet:
+            typed_counts = write_typed_parquet_files(records, out_dir)
+        parquet_rows = write_parquet(records, out_dir / "dataset.parquet")
+    return counts, combined_rows, typed_counts, parquet_rows
+
+
 def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | None = None) -> dict[str, Any]:
     final_dir = output_dir or config.export_dir
     per_video = config.export_dir / "per_video"
@@ -106,18 +143,20 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
         if kept:
             log.info("keeping %d record(s) of previously exported videos whose per-video export is gone", kept)
         records = merge_records(existing, records, fresh_ids)
-    counts = {}
-    combined_rows = 0
-    if "jsonl" in config.export.formats:
-        if config.export.per_type_jsonl:
-            counts = write_jsonl_files(records, final_dir)
-        else:
-            counts = {name: len(records.get(name, [])) for name in DATASET_FILES}
-        if config.export.combined_jsonl:
-            combined_rows = write_combined_jsonl(records, final_dir / COMBINED_FILE)
-    parquet_rows = 0
-    if "parquet" in config.export.formats:
-        parquet_rows = write_parquet(records, final_dir / "dataset.parquet")
+
+    # one schema for every record, then split / tier / subsets
+    records = upgrade_records(records)
+    curation = annotate_records(records, config.export)
+    splits = split_manifest(records)
+
+    counts, combined_rows, typed_counts, parquet_rows = _write_dataset_files(records, final_dir, config)
+    write_schema_file(final_dir / SCHEMA_FILE)
+    write_json_atomic(final_dir / SPLITS_FILE, {"salt": config.export.split.salt, "fractions": {"validation": config.export.split.validation_fraction, "test": config.export.split.test_fraction}, "videos": splits, "counts": {k: len(v) for k, v in splits.items()}})
+
+    cinematic_counts: dict[str, int] = {}
+    if config.export.cinematic.enabled and config.export.cinematic.write_files:
+        subset = subset_records(records, "cinematic")
+        cinematic_counts, _c, _t, _p = _write_dataset_files(subset, final_dir / CINEMATIC_DIR, config)
 
     videos = db.list_videos()
     exported_ids = {m["video_id"] for m in manifests}
@@ -132,17 +171,23 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
             "ocr_tracks": sum(int(m.get("ocr_tracks", 0)) for m in manifests),
             "parquet_rows": parquet_rows,
             "combined_jsonl_rows": combined_rows,
+            "typed_parquet_counts": typed_counts,
+            "cinematic": {**curation, "files": cinematic_counts},
             "files": {
                 **({name: str(final_dir / f"{name}.jsonl") for name in DATASET_FILES} if config.export.per_type_jsonl else {}),
+                **({f"{name}_parquet": str(final_dir / f"{name}.parquet") for name in DATASET_FILES if typed_counts.get(name)} if config.export.per_type_parquet else {}),
                 **({"dataset_jsonl": str(final_dir / COMBINED_FILE)} if config.export.combined_jsonl and "jsonl" in config.export.formats else {}),
                 **({"dataset_parquet": str(final_dir / "dataset.parquet")} if "parquet" in config.export.formats else {}),
+                "schemas": str(final_dir / SCHEMA_FILE),
+                "splits": str(final_dir / SPLITS_FILE),
+                **({"cinematic_dir": str(final_dir / CINEMATIC_DIR)} if cinematic_counts else {}),
             },
             "jsonl_counts": counts,
         },
     )
     write_json_atomic(final_dir / "statistics.json", stats)
-    write_json_atomic(final_dir / "manifest.json", {"videos": manifests, "counts": counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows})
-    log.info("aggregated %d videos -> %s", len(manifests), final_dir)
+    write_json_atomic(final_dir / "manifest.json", {"videos": manifests, "counts": counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows, "splits": {k: len(v) for k, v in splits.items()}, "cinematic": cinematic_counts})
+    log.info("aggregated %d videos -> %s (splits %s, cinematic records %d)", len(manifests), final_dir, {k: len(v) for k, v in splits.items()}, curation.get("cinematic", 0))
     return stats
 
 

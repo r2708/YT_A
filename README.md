@@ -291,6 +291,7 @@ video-dataset status [VIDEO_ID] [--json] [--watch SECONDS]
 video-dataset retry-failed [--until STAGE]
 video-dataset validate [VIDEO_ID]
 video-dataset export [--output DIR] [--rerun]
+video-dataset reannotate [SHARD_DIR...] [--from-hub] [--only shard_0001,...] [-o DIR] [--push] [--update-card]
 video-dataset package [-o bundle.zip] [--include-media]
 video-dataset upload [--force] [--dry-run] [--status]
 video-dataset stats
@@ -373,13 +374,15 @@ transcription:   { provider: faster_whisper, model: base, language: auto, vad_fi
 audio_events:    { provider: energy, model: MIT/ast-finetuned-audioset-10-10-0.4593, min_score: 0.3 }
 ocr:             { provider: rapidocr, min_confidence: 0.5, max_frames_per_scene: 6, merge_similarity: 0.85 }
 vision:          { provider: heuristic, preset: null, model: null, max_images_per_request: 6, image_max_side: 768,
-                   frame_captions: false, verify_with_model: true, enrichers: [] }
+                   frame_captions: false, verify_with_model: true, enrichers: [], aesthetic: true }
 llm:             { provider: none, model: null }        # text helper for qa.paraphrase / temporal.causal_inference
 temporal:        { min_camera_consistency: 0.6, min_camera_motion: 0.35, max_relation_neighbors: 6, long_range_min_gap_seconds: 20 }
 qa:              { questions_per_minute: 5, min_questions: 8, max_questions: 400, type_weights: {...}, paraphrase: false }
 validation:      { minimum_confidence: 0.75, review_confidence: 0.5, verifier: heuristic, grounding_min_overlap: 0.3 }
 deduplication:   { near_duplicate_threshold: 0.9, question_similarity_threshold: 0.92, evidence_iou_threshold: 0.5 }
-export:          { formats: [jsonl, parquet], include_review: true, include_rejected: false }
+export:          { formats: [jsonl, parquet], include_review: true, per_type_parquet: true, hard_negatives: true,
+                   split: {validation_fraction: 0.05, test_fraction: 0.05, salt: video-dataset-v1},
+                   tiers: {gold_min_overall: 0.8, silver_min_overall: 0.6}, cinematic: {min_tier: silver, min_aesthetic: 5.0} }
 pipeline:        { stage_retries: 1, continue_on_error: true, workers: 1, stage_workers: 0, model_stages_sequential: true }
 ```
 
@@ -438,16 +441,32 @@ llm:
 ```
 dataset.jsonl              EVERY record in one file; each line carries record_type (frame | clip | scene | event | temporal_qa | long_video_qa | video_description)
 dataset.parquet            the same records as normalized rows (one file, payload column holds the full JSON)
-frames.jsonl               frame  -> caption (+ objects, camera, environment, measurements, OCR text)
-clips.jsonl                clip   -> description (+ actions, camera, transcript)
-scenes.jsonl               scene  -> full structured description
-events.jsonl               time range -> event (+ outgoing temporal relations)
-temporal_qa.jsonl          temporal question + answer + evidence
-long_video_qa.jsonl        multi-scene / long-range reasoning question + answer + evidence
-video_descriptions.jsonl   generation-oriented description (subject, environment, action, camera, lighting, motion, progression, transitions)
-dataset.parquet            normalized rows for every record (record_type, video_id, times, text, answer, confidence, status, payload JSON)
+frames.jsonl / .parquet    frame  -> caption (+ objects, camera, environment, measurements, OCR text)
+clips.jsonl / .parquet     clip   -> description (+ actions, camera, subject motion, transcript, hard-negative captions)
+scenes.jsonl / .parquet    scene  -> full structured description (+ object position/scale, camera speed, subject motion, aesthetic score, hard negatives)
+events.jsonl / .parquet    time range -> event (+ outgoing temporal relations)
+temporal_qa.jsonl / .parquet      temporal question + answer + evidence + hard-negative answers
+long_video_qa.jsonl / .parquet    multi-scene / long-range reasoning question + answer + evidence + hard negatives
+video_descriptions.jsonl / .parquet  generation-oriented description (subject, environment, action, camera, lighting, motion, progression, transitions)
+cinematic/                 the cinematic subset in the same layout (see "Splits, tiers, subsets")
+splits.json                train / validation / test video ids
+schemas.json               JSON Schema of every record type
 statistics.json            dataset statistics (also printed by `video-dataset stats`)
 manifest.json              per-video counts and file locations
+```
+
+**Which file should a loader read?** The per-type `*.parquet` files. They are written with an
+explicit schema derived from the record models, so a column that is `null` in one file and filled
+in another (e.g. `template_id`, `confidence`) has the same type everywhere. JSON type inference
+cannot do that: `load_dataset("json", data_files="temporal_qa.jsonl")` fails with
+*Couldn't cast array of type string to null* as soon as two files disagree. Free-form fields
+(`object_details`, `people`, `relations`, `shots`, `validation.checks`) are stored as JSON strings
+in Parquet; everything else keeps its native type.
+
+```python
+from datasets import load_dataset
+scenes = load_dataset("parquet", data_files="data/final/scenes.parquet", split="train")
+train = scenes.filter(lambda r: r["split"] == "train" and r["tier"] in ("gold", "silver"))
 ```
 
 For a single upload use `dataset.jsonl` (or `dataset.parquet`). Media files are referenced by paths
@@ -460,6 +479,67 @@ Records with status `accepted` are always exported; `review` records are exporte
 (flagged, `export.include_review`), `rejected` and `duplicate` records stay in `data/validated/` and are
 excluded. Nothing is deleted.
 
+Every record type shares one envelope: `record_id`, `record_type`, `video_id`, the time window
+(`start_time` / `end_time`; frames `timestamp`; QA inside `evidence`), `provider`, `confidence` +
+`confidence_source`, `quality`, `validation`, `split`, `tier` + `tier_reasons`, `subsets`.
+
+### Splits, tiers, subsets, hard negatives
+
+* **`split`** - `train` / `validation` / `test`, assigned per *source video* from
+  `sha1(export.split.salt | video_id)` (defaults 90 / 5 / 5 %). All scenes, clips, frames,
+  events and questions of a video share its split, so nothing leaks between splits. `splits.json`
+  lists the video ids per split. Change the salt to reshuffle; keep it to keep the split stable
+  across re-exports.
+* **`tier`** - `gold` / `silver` / `bronze`, derived only from signals the pipeline measured:
+  `gold` = status `accepted`, `quality.overall >= 0.8`, a grounding component (verifier or direct
+  measurement) and a confidence >= 0.75 from a verifier / measurement source;
+  `silver` = accepted with `quality.overall >= 0.6`; `bronze` = everything else that is still
+  exported (review status, unscored quality, self-reported confidence). `tier_reasons` says what
+  blocked the next tier. With the `heuristic` / `cv_models` providers scene descriptions have no
+  verifier, so they top out at silver; that is the honest answer, not a bug.
+* **`subsets: ["cinematic"]`** - shots whose scene clears `export.cinematic`: tier >= silver,
+  duration >= 1.5 s, known camera movement, sharpness >= 50 and (when present) an aesthetic score
+  >= 5. Clips and frames inherit from their scene; events and QA join when every scene they rest on
+  qualifies. The subset is also written to `final/cinematic/` in the same layout.
+* **`hard_negatives`** on QA, scene and clip records - deliberately wrong texts with the rule that
+  makes them wrong: `swapped_order` (first/then reversed, before/after flipped), `wrong_duration`,
+  `shifted_time`, `other_event` (a real event outside the evidence window), `attribute_swap`
+  (measured camera movement or lighting level replaced by its opposite) and `other_shot` (the
+  caption of another shot of the same video whose measured attributes differ; `note` lists the
+  differences). Up to `export.hard_negatives_per_record` each.
+
+### Re-annotating shards that were exported earlier
+
+Shards exported before these fields existed do not need the pipeline to run again. `video-dataset
+reannotate` upgrades them in place from the exported records alone:
+
+```bash
+video-dataset reannotate                      # the current data/final
+video-dataset reannotate --from-hub           # download every shard_NNNN of upload.repo_id to data/reannotate and rewrite it locally
+video-dataset reannotate --from-hub --only shard_0001 -o /tmp/check   # one shard, written elsewhere for inspection
+video-dataset reannotate --from-hub --push --update-card              # rewrite and upload back in place (write token)
+```
+
+It re-validates every record against the current schema, rebuilds hard negatives from the exported
+events and scene records, assigns split / tier / subsets, and writes the per-type Parquet files,
+`cinematic/`, `splits.json`, `schemas.json` and refreshed statistics, plus the `per_video/` copies.
+Nothing is pushed unless `--push` is given; reading needs any token in `HF_TOKEN`, pushing a write
+token. Aesthetic score, subject motion and camera speed need the frames and stay empty for old shards.
+
+### Measured composition, motion and aesthetics (`cv_models`)
+
+* objects carry `position` (3x3 grid), `center`, `area_fraction`, `scale` (tiny .. dominant) and
+  `frame_fraction`, all from detector boxes
+* `camera.speed` (slow / moderate / fast) and `measurements.camera_speed_fraction_per_second` from
+  optical flow
+* `subject_motion` separates the main subject's motion from the camera's: box velocity minus the
+  background flow gives `relative_velocity`; a subject that stays in frame while the background
+  streams is `tracked_by_camera`, and the camera movement is promoted to `tracking` with
+  `tracked_subject`
+* `measurements.aesthetic_score` - the LAION aesthetic predictor (a linear head on the CLIP
+  embedding already computed for the zero-shot attributes; ~1 poor .. 10 excellent). Enabled by
+  `vision.aesthetic`, weights downloaded once to `~/.cache/video_dataset/aesthetic/`.
+
 ### Scene record (`scenes.jsonl`)
 
 ```json
@@ -467,24 +547,27 @@ excluded. Nothing is deleted.
   "record_id": "scene_0a3f9c2e8b71_scene_003",
   "video_id": "vid_0a3f9c2e8b71",
   "scene_id": "scene_003",
-  "start": 31.4, "end": 48.9, "duration": 17.5,
+  "record_type": "scene", "split": "train", "tier": "gold", "tier_reasons": [], "subsets": ["cinematic"],
+  "start_time": 31.4, "end_time": 48.9, "duration": 17.5,
   "summary": "A red sports car drives along a winding mountain road surrounded by dense forest...",
   "environment": {"location": "mountain road", "setting": "outdoor", "weather": "clear", "lighting": "bright", "time_of_day": "day", "background": "forested hills"},
   "objects": ["red sports car", "road", "trees"],
-  "object_details": [{"name": "red sports car", "attributes": ["red", "convertible"], "location": "center", "count": 1, "confidence": null, "confidence_source": "unavailable"}],
+  "object_details": [{"name": "red sports car", "attributes": ["red", "convertible"], "location": "center", "count": 1, "confidence": null, "confidence_source": "unavailable", "position": "center", "center": [0.51, 0.58], "area_fraction": 0.12, "scale": "medium", "frame_fraction": 1.0}],
   "people": null,
   "actions": ["a red sports car drives toward the camera", "camera tracks the vehicle"],
-  "camera": {"shot_type": "wide", "camera_angle": "eye_level", "movement": "tracking", "zoom": null, "stability": null, "is_aerial": null, "confidence": 0.82, "confidence_source": "measurement"},
+  "camera": {"shot_type": "wide", "camera_angle": "eye_level", "movement": "tracking", "zoom": null, "stability": null, "is_aerial": null, "speed": "moderate", "tracked_subject": "car", "confidence": 0.82, "confidence_source": "measurement"},
+  "subject_motion": {"subject": "car", "label": "tracked_by_camera", "camera_relation": "tracked", "box_velocity": [0.01, 0.0], "camera_velocity": [0.18, 0.0], "relative_velocity": [-0.17, 0.0], "scale_change_per_second": 0.03, "n_frames": 6, "confidence": 0.9, "confidence_source": "measurement"},
   "visual_style": {"composition": "car centred on the road, leading lines from the asphalt", "lighting": "hard sunlight from the upper left", "color": "saturated greens and a red accent", "depth_of_field": "deep", "framing": "wide", "perspective": "low, near road level", "motion": "smooth forward tracking", "transitions": null},
   "temporal_progression": "The car grows larger as it approaches; the road bends left in the last frames.",
   "transcript": "We are entering the mountains now.",
   "ocr_text": [],
   "frame_ids": ["frame_003_000", "frame_003_001", "frame_003_002"],
   "clip_id": "clip_003",
-  "measurements": {"brightness_mean": 141.2, "contrast": 0.41, "saturation_mean": 118.6, "dominant_colors": ["#4f7a2b", "#8d8f93", "#b0201c"], "color_temperature": "neutral", "edge_density": 0.071, "sharpness": 312.5, "motion_magnitude": 1.84, "camera_motion_label": "zoom_in", "camera_motion_consistency": 0.82, "brightness_trend": "stable", "lighting_level": "normal"},
+  "measurements": {"brightness_mean": 141.2, "contrast": 0.41, "saturation_mean": 118.6, "dominant_colors": ["#4f7a2b", "#8d8f93", "#b0201c"], "color_temperature": "neutral", "edge_density": 0.071, "sharpness": 312.5, "motion_magnitude": 1.84, "camera_motion_label": "zoom_in", "camera_motion_consistency": 0.82, "camera_speed": "moderate", "camera_speed_fraction_per_second": 0.18, "brightness_trend": "stable", "lighting_level": "normal", "aesthetic_score": 6.2, "aesthetic_model": "laion/sa_0_4_vit_b_32_linear"},
   "provider": "api:anthropic", "confidence": 0.91, "confidence_source": "verifier",
   "quality": {"grounding": 0.91, "temporal_accuracy": null, "description_quality": 0.78, "overall": 0.845, "components_used": ["grounding", "description_quality"], "notes": []},
-  "validation": {"status": "accepted", "issues": [], "checks": {"timestamps": true, "scene_exists": true, "frames_exist": true, "frame_files_exist": true, "summary_present": true}, "verifier_score": 0.91, "duplicate_of": null}
+  "validation": {"status": "accepted", "issues": [], "checks": {"timestamps": true, "scene_exists": true, "frames_exist": true, "frame_files_exist": true, "summary_present": true}, "verifier_score": 0.91, "duplicate_of": null},
+  "hard_negatives": [{"text": "A red sports car drives along ... the camera is static ...", "kind": "attribute_swap", "source_ids": ["scene_003"], "note": "camera measured tracking, negative claims static"}]
 }
 ```
 
@@ -557,7 +640,7 @@ camera and transcript. `video_descriptions.jsonl` rows are assembled generation 
   "temporal_progression": "Shot 1 (0.0-4.2s): ... Shot 2 (4.2-9.8s): ...",
   "transitions": "36 shot changes (cut, fade)",
   "prompt": "Subject: llama, penguin. Environment: snowy mountain slope; ice cave. Action: ... Camera: ... Lighting: ... Temporal progression: Shot 1 (0.0-4.2s): ...",
-  "shots": [{"scene_id": "scene_001", "start": 0.0, "end": 4.2, "summary": "...", "camera": "wide shot, the camera pans left", "transition_in": "start", "temporal_progression": null}]
+  "shots": [{"scene_id": "scene_001", "start_time": 0.0, "end_time": 4.2, "summary": "...", "camera": "wide shot, the camera pans left", "transition_in": "start", "temporal_progression": null}]
 }
 ```
 
@@ -565,8 +648,9 @@ camera and transcript. `video_descriptions.jsonl` rows are assembled generation 
 
 `dataset.parquet` has one row per exported record with columns
 `record_id, record_type, video_id, scene_id, start_time, end_time, text, answer, qa_type, difficulty,
-confidence, confidence_source, validation_status, quality_overall, media_path, payload` where
-`payload` is the full JSON record. Filter by `record_type` and `validation_status` to build training splits.
+provider, confidence, confidence_source, validation_status, quality_overall, split, tier, subsets,
+aesthetic_score, hard_negatives (count), media_path, payload` where `payload` is the full JSON record.
+The per-type `<type>.parquet` files hold the full records with typed columns; use them for training.
 
 ## Checkpoint / resume system
 

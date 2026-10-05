@@ -123,6 +123,22 @@ def motion_segments(scan: SceneScan | None, min_motion: float, min_run: int = 2,
     return segments
 
 
+def camera_speed(scan: SceneScan | None, label: CameraMovement) -> tuple[str | None, float | None]:
+    """(speed label, mean global translation as fraction of frame width per second) for a moving camera.
+
+    slow < 0.08 frame/s, moderate < 0.25 frame/s, fast otherwise. None when the camera is static,
+    unknown, or the scan carries no flow.
+    """
+    if scan is None or label in (CameraMovement.STATIC, CameraMovement.UNKNOWN) or not scan.analysis_width or not scan.analysis_fps:
+        return None, None
+    mags = [s.flow_mag for s in scan.samples if s.flow_mag is not None]
+    if not mags:
+        return None, None
+    frac = float(np.mean(mags)) * float(scan.analysis_fps) / float(scan.analysis_width)
+    word = "slow" if frac < 0.08 else ("moderate" if frac < 0.25 else "fast")
+    return word, round(frac, 4)
+
+
 MOVEMENT_PHRASES: dict[CameraMovement, str] = {
     CameraMovement.STATIC: "the camera is static",
     CameraMovement.PAN_LEFT: "the camera pans left",

@@ -165,6 +165,11 @@ class VisionConfig(_Section):
     use_video_input: bool = False
     enrichers: list[str] = Field(default_factory=list)
     clip_model: str = "openai/clip-vit-base-patch32"
+    # LAION aesthetic predictor: a linear head on the CLIP image embedding (~1 poor .. 10 excellent).
+    # Runs wherever CLIP already runs (cv_models provider or the `clip` enricher); no extra model.
+    aesthetic: bool = True
+    aesthetic_weights: str | None = None  # path or URL of the .pth; null -> picked for clip_model and cached
+    aesthetic_cache_dir: str | None = None  # null -> ~/.cache/video_dataset/aesthetic
     max_new_tokens: int = 700
     temperature: float = 0.0
     timeout_seconds: int = 120
@@ -259,6 +264,40 @@ class DeduplicationConfig(_Section):
     shingle_size: int = 3
 
 
+class SplitConfig(_Section):
+    """Deterministic train / validation / test assignment per *source video* (hash of the video id),
+    so no scene, clip, frame or question of one video ever lands in two splits."""
+
+    enabled: bool = True
+    validation_fraction: float = 0.05
+    test_fraction: float = 0.05
+    salt: str = "video-dataset-v1"  # change to reshuffle; keep fixed to keep the split stable across runs
+
+
+class TierConfig(_Section):
+    """Gold / silver / bronze from signals already measured; nothing is guessed."""
+
+    enabled: bool = True
+    gold_min_overall: float = 0.8  # quality.overall needed for gold
+    silver_min_overall: float = 0.6  # quality.overall needed for silver
+    gold_requires_grounding: bool = True  # gold needs a grounding component (verifier or direct measurement)
+    gold_min_confidence: float = 0.75  # and a confidence from a verifier / measurement at least this high
+
+
+class CinematicSubsetConfig(_Section):
+    """`subsets: ["cinematic"]` + final/cinematic/: shots that clear tier, aesthetic and camera criteria.
+    QA and events join when every scene they rest on is in the subset."""
+
+    enabled: bool = True
+    min_tier: str = "silver"  # gold | silver | bronze
+    min_aesthetic: float = 5.0  # LAION scale 1..10
+    require_aesthetic: bool = False  # true: records without an aesthetic score are excluded
+    min_scene_duration: float = 1.5
+    require_known_camera: bool = True  # camera.movement must not be "unknown"
+    min_sharpness: float = 50.0  # variance of Laplacian; 0 disables
+    write_files: bool = True  # also write final/cinematic/<type>.jsonl (+ dataset.jsonl)
+
+
 class ExportConfig(_Section):
     formats: list[str] = Field(default_factory=lambda: ["jsonl", "parquet"])
     include_review: bool = True
@@ -267,9 +306,15 @@ class ExportConfig(_Section):
     relative_paths: bool = True
     combined_jsonl: bool = True  # also write one dataset.jsonl holding every record (tagged with record_type)
     per_type_jsonl: bool = True  # write frames.jsonl, scenes.jsonl, ... alongside
+    per_type_parquet: bool = True  # frames.parquet, scenes.parquet, ... with an explicit schema (what loaders should read)
     # Keep records of previously exported videos when the final files are rebuilt, even if their
     # per_video/ folder is gone. New exports of the same video replace its old records (by record id).
     merge_existing: bool = True
+    hard_negatives: bool = True  # attach rule-built wrong answers / captions to QA, scene and clip records
+    hard_negatives_per_record: int = 3
+    split: SplitConfig = Field(default_factory=SplitConfig)
+    tiers: TierConfig = Field(default_factory=TierConfig)
+    cinematic: CinematicSubsetConfig = Field(default_factory=CinematicSubsetConfig)
 
 
 class UploadConfig(_Section):

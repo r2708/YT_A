@@ -122,6 +122,9 @@ vision:
   use_video_input: false
   enrichers: []            # optional grounded enrichers, e.g. [clip]
   clip_model: openai/clip-vit-base-patch32
+  aesthetic: true          # LAION aesthetic predictor (linear head on the CLIP embedding, ~1..10) wherever CLIP runs
+  aesthetic_weights: null  # path/URL of the .pth; null -> the head matching clip_model, downloaded once
+  aesthetic_cache_dir: null  # null -> ~/.cache/video_dataset/aesthetic
   max_new_tokens: 700
   temperature: 0.0
   timeout_seconds: 120
@@ -213,7 +216,30 @@ export:
   relative_paths: true
   combined_jsonl: true     # one dataset.jsonl with every record (each line carries record_type) - upload a single file
   per_type_jsonl: true     # also write frames.jsonl, clips.jsonl, scenes.jsonl, events.jsonl, temporal_qa.jsonl, ...
+  per_type_parquet: true   # frames.parquet, scenes.parquet, ... with an explicit schema - what dataset loaders should read
   merge_existing: true     # rebuilding final/ keeps records of earlier videos whose per_video/ export is gone
+  hard_negatives: true     # rule-built wrong answers (QA) and wrong captions (scenes, clips) for contrastive training
+  hard_negatives_per_record: 3
+  split:                   # train / validation / test by hash of the source video id (no leakage across scenes)
+    enabled: true
+    validation_fraction: 0.05
+    test_fraction: 0.05
+    salt: video-dataset-v1 # keep fixed to keep the split stable; change to reshuffle
+  tiers:                   # gold / silver / bronze from measured signals only
+    enabled: true
+    gold_min_overall: 0.8
+    silver_min_overall: 0.6
+    gold_requires_grounding: true   # gold needs a verifier / measurement grounding component
+    gold_min_confidence: 0.75
+  cinematic:               # subsets: [cinematic] + final/cinematic/
+    enabled: true
+    min_tier: silver       # gold | silver | bronze
+    min_aesthetic: 5.0     # LAION aesthetic score (1..10)
+    require_aesthetic: false  # true: shots without an aesthetic score never qualify
+    min_scene_duration: 1.5
+    require_known_camera: true
+    min_sharpness: 50.0
+    write_files: true
 
 upload:
   provider: huggingface    # none | huggingface - upload final/ automatically once it reaches threshold_mb
