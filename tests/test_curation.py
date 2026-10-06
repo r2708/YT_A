@@ -195,7 +195,9 @@ def test_typed_parquet_has_stable_schema_across_null_columns(tmp_path: Path):
     filled = [QARecord(question_id=f"qa_v_{i:06d}", template_id="duration_v1", confidence=0.8, quality=QualityScore.from_components(grounding=0.9), validation=ValidationInfo(status=ValidationStatus.ACCEPTED, checks={"a": True, "b": None}), **base) for i in range(3, 6)]
     counts = write_typed_parquet_files({"temporal_qa": only_nulls}, tmp_path / "a")
     counts2 = write_typed_parquet_files({"temporal_qa": filled}, tmp_path / "b")
-    assert counts["temporal_qa"] == 3 and counts2["temporal_qa"] == 3 and not (tmp_path / "a" / "frames.parquet").exists()
+    assert counts["temporal_qa"] == 3 and counts2["temporal_qa"] == 3
+    # a type without records still gets an empty, typed file: the card's `shard_*/<type>.parquet` globs resolve in every shard
+    assert counts["frames"] == 0 and pq.read_table(tmp_path / "a" / "frames.parquet").num_rows == 0
     ta, tb = pq.read_table(tmp_path / "a" / "temporal_qa.parquet"), pq.read_table(tmp_path / "b" / "temporal_qa.parquet")
     assert ta.schema.equals(tb.schema)  # identical schemas although one file has only nulls
     assert str(ta.schema.field("template_id").type) == "string" and str(ta.schema.field("confidence").type) == "double"
@@ -268,7 +270,8 @@ def test_apply_subject_motion_promotes_pan_to_tracking_and_describes_it():
     sm = analyze_subject_motion([[_det("person", 70, 25)] for _ in ts], ts, _scan(8.0), CameraMovement.PAN_LEFT)
     a = SceneAnalysis(scene_id="s", video_id="v", start_time=0, end_time=3, summary="A shot; the camera pans left.", camera=CameraAnnotation(movement=CameraMovement.PAN_LEFT, confidence=0.9, confidence_source=ConfidenceSource.MEASUREMENT))
     apply_subject_motion(a, sm)
-    assert a.camera.movement == CameraMovement.TRACKING and a.camera.tracked_subject == "person" and a.subject_motion is sm
+    assert a.camera.movement == CameraMovement.TRACKING_LEFT and a.camera.tracked_subject == "person" and a.subject_motion is sm  # pan left -> tracks moving left
+    assert a.camera.camera_movement == "tracking" and a.camera.movement_direction == "left"
     assert a.summary.endswith("The camera tracks the person, which stays in place in the frame while the background moves.")
     assert any("tracks the person" in x for x in a.actions) and "tracks the person" in (a.visual_style.motion or "")
     static = SceneAnalysis(scene_id="s", video_id="v", start_time=0, end_time=3, summary="A shot.", camera=CameraAnnotation(movement=CameraMovement.STATIC))

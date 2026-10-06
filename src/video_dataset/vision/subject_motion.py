@@ -21,7 +21,8 @@ from video_dataset.schemas.common import ConfidenceSource
 from video_dataset.schemas.scene import SceneScan
 from video_dataset.schemas.vision import CameraMovement, SceneAnalysis, SubjectMotion
 
-TRACKABLE = {CameraMovement.PAN_LEFT, CameraMovement.PAN_RIGHT, CameraMovement.TILT_UP, CameraMovement.TILT_DOWN, CameraMovement.HANDHELD, CameraMovement.COMPLEX, CameraMovement.TRACKING}
+TRACKING_SET = {CameraMovement.TRACKING, CameraMovement.TRACKING_LEFT, CameraMovement.TRACKING_RIGHT, CameraMovement.TRACKING_FORWARD, CameraMovement.TRACKING_BACKWARD}
+TRACKABLE = {CameraMovement.PAN_LEFT, CameraMovement.PAN_RIGHT, CameraMovement.TILT_UP, CameraMovement.TILT_DOWN, CameraMovement.HANDHELD, CameraMovement.COMPLEX, *TRACKING_SET}
 ZOOMS = {CameraMovement.ZOOM_IN, CameraMovement.ZOOM_OUT}
 EPS = 0.03  # fraction of the frame per second below which motion counts as none
 SCALE_EPS = 0.02  # area-fraction change per second that counts as approaching / receding
@@ -198,17 +199,33 @@ def subject_motion_phrase(sm: SubjectMotion) -> str:
     return f"the {n} moves {direction}{tail}"
 
 
+def tracking_direction(movement: CameraMovement, sm: SubjectMotion) -> CameraMovement:
+    """Which way the camera travels while it tracks: from the pan direction it was labelled with, else
+    from the background flow (content streaming right = camera moving left), else undetermined."""
+    if movement == CameraMovement.PAN_LEFT:
+        return CameraMovement.TRACKING_LEFT
+    if movement == CameraMovement.PAN_RIGHT:
+        return CameraMovement.TRACKING_RIGHT
+    cam = list(sm.camera_velocity) + [0.0, 0.0]
+    if abs(cam[0]) >= EPS and abs(cam[0]) >= abs(cam[1]):
+        return CameraMovement.TRACKING_LEFT if cam[0] > 0 else CameraMovement.TRACKING_RIGHT
+    return CameraMovement.TRACKING
+
+
 def apply_subject_motion(analysis: SceneAnalysis, sm: SubjectMotion | None) -> None:
     """Attach the measurement; promote pan/handheld to TRACKING when the subject is held in frame."""
     if sm is None:
         return
     analysis.subject_motion = sm
-    if sm.label == "tracked_by_camera" and analysis.camera.movement in TRACKABLE and analysis.camera.movement != CameraMovement.TRACKING:
-        analysis.camera.movement = CameraMovement.TRACKING
-        analysis.camera.tracked_subject = sm.subject
+    if sm.label == "tracked_by_camera" and analysis.camera.movement in TRACKABLE and analysis.camera.movement not in TRACKING_SET:
         confs = [c for c in (analysis.camera.confidence, sm.confidence) if c is not None]
-        analysis.camera.confidence = round(min(confs), 3) if confs else None
-        analysis.camera.confidence_source = ConfidenceSource.MEASUREMENT
+        analysis.camera = analysis.camera.model_copy(update={
+            "movement": tracking_direction(analysis.camera.movement, sm),
+            "tracked_subject": sm.subject,
+            "confidence": round(min(confs), 3) if confs else None,
+            "confidence_source": ConfidenceSource.MEASUREMENT,
+        })
+        analysis.camera = type(analysis.camera).model_validate(analysis.camera.model_dump())  # re-derive the taxonomy block
     phrase = subject_motion_phrase(sm)
     action = phrase[0].upper() + phrase[1:]
     if action not in analysis.actions and sm.label != "static":

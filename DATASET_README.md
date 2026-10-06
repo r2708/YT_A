@@ -17,6 +17,21 @@ tags:
 pretty_name: YouTube Video Dataset
 size_categories:
 - 1K<n<10K
+configs:
+- config_name: frames
+  data_files: "shard_*/frames.parquet"
+- config_name: clips
+  data_files: "shard_*/clips.parquet"
+- config_name: scenes
+  data_files: "shard_*/scenes.parquet"
+- config_name: events
+  data_files: "shard_*/events.parquet"
+- config_name: temporal_qa
+  data_files: "shard_*/temporal_qa.parquet"
+- config_name: long_video_qa
+  data_files: "shard_*/long_video_qa.parquet"
+- config_name: video_descriptions
+  data_files: "shard_*/video_descriptions.parquet"
 ---
 
 # YouTube Video Dataset
@@ -74,6 +89,17 @@ This dataset contains structured, temporally-grounded multimodal data extracted 
 - `tier`: gold / silver / bronze from measured signals only, with `tier_reasons`
 - `subsets`: named subsets such as `cinematic` (also written to `cinematic/`)
 - `hard_negatives` on QA, scene and clip records: rule-built wrong answers / captions (swapped order, shifted time, wrong duration, opposite camera movement or lighting, caption of a measurably different shot)
+
+**🎬 Camera Taxonomy (every provider, one vocabulary)**
+- `camera.camera_movement`: static | pan | tilt | dolly | tracking | orbit | crane | zoom | handheld | fpv | drone | complex, with `movement_direction` (left / right / up / down / in / out / forward / backward / clockwise / counterclockwise) and measured `movement_speed`
+- `camera.shot_size`, `camera_angle`, `camera_height`, `camera_distance`, `stabilization`
+- `lens_type`, `focal_length_mm`, `depth_of_field`, `focus_type`, `perspective`: VLM estimates only (`lens_confidence_source`); null for measurement-only providers, never invented
+
+**✍️ Raw Description + Generation Prompt**
+- `summary` / `description`: the raw analysis text
+- `generation_prompt` (scene + clip records): the same shot as a text-to-video prompt, assembled from the structured fields only
+
+**🔗 Hierarchy**: video → clip (`clip_id`, `frame_ids`) → frame (`clip_id`); with media included, `clips/metadata.jsonl` and `frames/metadata.jsonl` follow the Hub videofolder / imagefolder convention
 
 **🎥 Measured Composition & Motion** (`cv_models` provider)
 - Object position (3x3 grid), scale class and area fraction from detector boxes

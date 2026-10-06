@@ -14,6 +14,7 @@ Tokens are read from the environment (`upload.token_env`, default HF_TOKEN) and 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -23,14 +24,21 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from video_dataset.config import PipelineConfig, UploadConfig
-from video_dataset.dataset.export import COMBINED_FILE, DATASET_FILES
-from video_dataset.utils.io import read_json, write_json_atomic
+from video_dataset.dataset.export import CINEMATIC_DIR, COMBINED_FILE, DATASET_FILES, SCHEMA_FILE, SPLITS_FILE
+from video_dataset.utils.io import read_json, read_jsonl, write_json_atomic, write_jsonl
 from video_dataset.utils.logging import get_logger
 from video_dataset.utils.retry import retry_call
 
 log = get_logger("dataset.upload")
 
-DATASET_ROOT_FILES = [f"{n}.jsonl" for n in DATASET_FILES] + [COMBINED_FILE, "dataset.parquet", "statistics.json", "manifest.json"]
+# Everything at the root of final/ that belongs to the shard. The per-type Parquet files are what the
+# dataset card's loader configs point at, so a shard uploaded without them is invisible to loaders.
+DATASET_ROOT_FILES = (
+    [f"{n}.jsonl" for n in DATASET_FILES]
+    + [f"{n}.parquet" for n in DATASET_FILES]
+    + [COMBINED_FILE, "dataset.parquet", SCHEMA_FILE, SPLITS_FILE, "statistics.json", "manifest.json"]
+)
+DATASET_ROOT_DIRS = [CINEMATIC_DIR]  # subset directories with the same layout, shipped as a whole
 STATE_FILE = "uploads.json"
 UPLOADED_DIR = "uploaded"
 AFTER_UPLOAD_MODES = ("archive", "delete")
@@ -101,6 +109,11 @@ def measure_shard(final_dir: Path, data_dir: Path, include_media: bool) -> tuple
         if f.exists():
             total += f.stat().st_size
             files += 1
+    for name in DATASET_ROOT_DIRS:
+        d = final_dir / name
+        if d.is_dir():
+            total += _dir_size(d)
+            files += sum(1 for p in d.rglob("*") if p.is_file())
     videos = shard_videos(final_dir)
     for vid in videos:
         d = final_dir / "per_video" / vid
@@ -140,6 +153,10 @@ def stage_shard(final_dir: Path, data_dir: Path, videos: list[str], include_medi
         if f.exists():
             _link_or_copy(f, staging / name)
             n += 1
+    for name in DATASET_ROOT_DIRS:
+        d = final_dir / name
+        if d.is_dir():
+            n += _link_tree(d, staging / name)
     for vid in videos:
         d = final_dir / "per_video" / vid
         if d.exists():
@@ -147,7 +164,40 @@ def stage_shard(final_dir: Path, data_dir: Path, videos: list[str], include_medi
     if include_media:
         for d, rel in media_dirs(data_dir, videos):
             n += _link_tree(d, staging / rel)
+        n += write_media_metadata(final_dir, staging, set(videos))
     return n
+
+
+_CLIP_META = ("record_id", "video_id", "scene_id", "clip_id", "start_time", "end_time", "description", "generation_prompt", "transcript", "split", "tier", "subsets")
+_FRAME_META = ("record_id", "video_id", "scene_id", "clip_id", "frame_id", "timestamp", "caption", "split", "tier", "subsets")
+_CAMERA_META = ("shot_size", "camera_angle", "camera_movement", "movement_direction", "movement_speed", "lens_type", "focal_length_mm", "depth_of_field")
+
+
+def write_media_metadata(final_dir: Path, staging: Path, videos: set[str]) -> int:
+    """``clips/metadata.jsonl`` and ``frames/metadata.jsonl`` next to the media, in the layout the
+    Hub's videofolder / imagefolder loaders expect: one row per file with ``file_name`` relative to
+    that folder plus the record's caption / prompt / camera fields. Returns the number of files written."""
+    written = 0
+    for kind, sub, path_key, keys in (("clips", "clips", "clip_path", _CLIP_META), ("frames", "frames", "frame_path", _FRAME_META)):
+        src = final_dir / f"{kind}.jsonl"
+        if not src.exists():
+            continue
+        rows = []
+        for rec in read_jsonl(src):
+            if str(rec.get("video_id")) not in videos:
+                continue
+            p = str(rec.get(path_key) or "").replace("\\", "/")
+            if not p.startswith(f"{sub}/"):
+                continue  # not under data/<sub>/: the loader could not find it anyway
+            row: dict[str, Any] = {"file_name": p[len(sub) + 1:]}
+            row.update({k: rec.get(k) for k in keys})
+            cam = rec.get("camera") if isinstance(rec.get("camera"), dict) else {}
+            row.update({k: cam.get(k) for k in _CAMERA_META})
+            rows.append(row)
+        if rows:
+            write_jsonl(staging / sub / "metadata.jsonl", rows)
+            written += 1
+    return written
 
 
 # ----------------------------------------------------------------------------- Hub client
@@ -174,11 +224,21 @@ class HuggingFaceUploader:
         return str(url)
 
     def ensure_card(self, readme: str) -> bool:
+        """Create the dataset card, or refresh the loader `configs:` block of an existing one. Without
+        that block the Hub viewer globs every JSONL/Parquet file in the repo into one table, and the
+        per-type files (frames, clips, scenes, ...) have different columns -> CastError. Returns True
+        when README.md was written."""
         if self.api.file_exists(self.repo_id, "README.md", repo_type=self.cfg.repo_type):
-            return False
+            current = Path(self.api.hf_hub_download(self.repo_id, "README.md", repo_type=self.cfg.repo_type)).read_text(encoding="utf-8")
+            merged = merge_card_configs(current, self.cfg)
+            if merged == current:
+                return False
+            body, message = merged, "Update dataset card: loader configs point at the per-type Parquet files"
+        else:
+            body, message = readme, "Add dataset card"
         self.api.upload_file(
-            path_or_fileobj=readme.encode("utf-8"), path_in_repo="README.md", repo_id=self.repo_id,
-            repo_type=self.cfg.repo_type, commit_message="Add dataset card",
+            path_or_fileobj=body.encode("utf-8"), path_in_repo="README.md", repo_id=self.repo_id,
+            repo_type=self.cfg.repo_type, commit_message=message,
         )
         return True
 
@@ -190,17 +250,38 @@ class HuggingFaceUploader:
         return str(getattr(info, "commit_url", None) or info)
 
 
+def card_configs(cfg: UploadConfig) -> str:
+    """The `configs:` entries of the dataset card: one loader config per record type, reading the
+    typed Parquet file of every shard. Parquet carries an explicit schema, so nullable columns load
+    the same way in every shard; JSON type inference fails on columns that are null in one shard and
+    filled in another. `shard_*/` (single star) matches the shard roots only, not per_video/ or
+    cinematic/, so each config holds exactly one record type."""
+    prefix = (cfg.path_in_repo.strip("/") + "/") if cfg.path_in_repo else ""
+    return "\n".join(f"- config_name: {n}\n  data_files: \"{prefix}shard_*/{n}.parquet\"" for n in DATASET_FILES)
+
+
+_FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---[ \t]*\n?", re.S)
+_CONFIGS_BLOCK = re.compile(r"^configs:[ \t]*\n(?:[ \t-].*\n?)*", re.M)
+
+
+def merge_card_configs(readme: str, cfg: UploadConfig) -> str:
+    """Return `readme` with its YAML `configs:` block replaced by (or extended with) the current loader
+    configs; everything else in the card is preserved. A card without front matter gets one."""
+    configs = "configs:\n" + card_configs(cfg) + "\n"
+    m = _FRONT_MATTER.match(readme)
+    if not m:
+        return f"---\n{configs}---\n\n{readme.lstrip()}"
+    fm = _CONFIGS_BLOCK.sub("", m.group(1) + "\n").rstrip("\n")
+    fm = (fm + "\n" if fm else "") + configs
+    return f"---\n{fm}---\n{readme[m.end():]}"
+
+
 def dataset_card(cfg: UploadConfig, config: PipelineConfig) -> str:
     name = (cfg.repo_id or "dataset").split("/")[-1]
-    prefix = (cfg.path_in_repo.strip("/") + "/") if cfg.path_in_repo else ""
-    # Parquet carries an explicit schema: nullable columns load the same way in every shard. The JSONL
-    # files are kept for reading, but JSON type inference fails on columns that are null in one shard
-    # and filled in another, so the loader configs point at the Parquet files.
-    configs = "\n".join(f"- config_name: {n}\n  data_files: \"{prefix}shard_*/{n}.parquet\"" for n in DATASET_FILES)
     return f"""---
 pretty_name: {name}
 configs:
-{configs}
+{card_configs(cfg)}
 ---
 
 # {name}
@@ -228,7 +309,16 @@ Every record carries `split` (train / validation / test, assigned per source vid
 leaks across splits), `tier` (gold / silver / bronze with `tier_reasons`) and `subsets`. Filter on
 them rather than re-splitting by record.
 | `per_video/<video_id>/` | the same records grouped by source video |
-{"| `frames/`, `clips/` | the JPEG frames and MP4 clips the records reference (paths are relative to the shard root) |" if cfg.include_media else "| *(media)* | frames and clips are not included; `frame_path` / `clip_path` are relative to the producer's data directory |"}
+{"| `frames/`, `clips/` | the JPEG frames and MP4 clips the records reference (paths are relative to the shard root); each folder has a `metadata.jsonl` (`file_name` + caption / prompt / camera) for the imagefolder / videofolder loaders |" if cfg.include_media else "| *(media)* | frames and clips are not included; `frame_path` / `clip_path` are relative to the producer's data directory |"}
+
+Records are linked top-down: a video has clips (`clip_id`), a clip lists its sampled frames
+(`frame_ids`) and every frame names its clip (`clip_id`). Scene and clip records carry both the raw
+analysis text (`summary` / `description`) and a `generation_prompt` built from the structured
+fields only. Camera annotations use one vocabulary for every provider: `camera_movement`
+(static | pan | tilt | dolly | tracking | orbit | crane | zoom | handheld | fpv | drone | complex) with
+`movement_direction` and measured `movement_speed`, plus `shot_size`, `camera_height`,
+`camera_distance`, `stabilization`; `lens_type`, `focal_length_mm`, `depth_of_field` and
+`focus_type` are VLM estimates (`lens_confidence_source`) and stay null for measurement-only providers.
 
 Only public video metadata (title, channel, duration, license) is stored. Make sure you have the
 right to redistribute the source videos' derived data before sharing this dataset.
@@ -246,6 +336,10 @@ def _rotate(final_dir: Path, data_dir: Path, videos: list[str], include_media: b
         f = final_dir / name
         if f.exists():
             targets.append((f, archive / name))
+    for name in DATASET_ROOT_DIRS:
+        d = final_dir / name
+        if d.is_dir():
+            targets.append((d, archive / name))
     for vid in videos:
         d = final_dir / "per_video" / vid
         if d.exists():

@@ -66,7 +66,11 @@ def test_generator_is_deterministic():
 
 
 # ---------------------------------------------------------------- on-screen text filtering
-from video_dataset.questions.ocr_filter import looks_like_text, recurring_text_events, unusable_text_events  # noqa: E402
+from video_dataset.questions.ocr_filter import (  # noqa: E402
+    looks_like_text,
+    recurring_text_events,
+    unusable_text_events,
+)
 
 
 def _ocr(i, start, text, scene="scene_001"):

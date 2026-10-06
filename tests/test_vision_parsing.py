@@ -24,7 +24,7 @@ def test_extract_json_tolerates_fences_and_trailing_commas():
 
 def test_coerce_enum_aliases():
     assert coerce_enum("Wide Shot", ShotType, ShotType.UNKNOWN) == ShotType.WIDE
-    assert coerce_enum("dolly in", CameraMovement, CameraMovement.UNKNOWN) == CameraMovement.TRACKING_FORWARD
+    assert coerce_enum("dolly in", CameraMovement, CameraMovement.UNKNOWN) == CameraMovement.DOLLY_IN
     assert coerce_enum("weird", CameraMovement, CameraMovement.UNKNOWN) == CameraMovement.UNKNOWN
 
 

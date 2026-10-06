@@ -132,10 +132,15 @@ def _record_scene_ids(kind: str, rec: dict[str, Any]) -> list[str]:
 
 # ------------------------------------------------------------------------------------ driver
 def annotate_records(records: dict[str, list[dict[str, Any]]], cfg: ExportConfig) -> dict[str, int]:
-    """Fill split / tier / tier_reasons / subsets on every record dict in place.
+    """Fill split / tier / tier_reasons / subsets on every record dict in place, link frames to
+    their clip and attach generation prompts to scene / clip records.
 
     Returns counts: {"cinematic": n_records_in_subset, "cinematic_scenes": n_scenes}.
     """
+    from video_dataset.dataset.prompting import fill_frame_clip_ids, fill_generation_prompts
+
+    fill_frame_clip_ids(records)
+    fill_generation_prompts(records)
     for rows in records.values():
         for rec in rows:
             vid = str(rec.get("video_id") or "")

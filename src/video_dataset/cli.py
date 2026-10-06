@@ -498,7 +498,7 @@ def reannotate(
     work_dir: Annotated[str | None, typer.Option("--work-dir", help="Where downloaded shards are stored (default data/reannotate)")] = None,
     output: Annotated[str | None, typer.Option("--output", "-o", help="Write the rewritten shard(s) here instead of in place (one sub-folder per shard)")] = None,
     push: Annotated[bool, typer.Option("--push", help="Upload each rewritten shard back to the Hub in place (needs a write token)")] = False,
-    update_card: Annotated[bool, typer.Option("--update-card", help="Also overwrite README.md on the Hub with the current dataset card")] = False,
+    update_card: Annotated[bool, typer.Option("--update-card", help="Also refresh the loader configs (per-type Parquet) in README.md on the Hub; the rest of the card is kept")] = False,
     no_negatives: Annotated[bool, typer.Option("--no-negatives", help="Skip rebuilding hard negatives")] = False,
     config: ConfigOpt = None,
     set_: SetOpt = None,
@@ -567,7 +567,7 @@ def reannotate(
         if not token:
             console.print("[red]--update-card needs a write token[/red]")
             raise typer.Exit(1)
-        console.print(f"dataset card updated: {update_dataset_card(cfg, token)}")
+        console.print(f"dataset card updated: {update_dataset_card(cfg, token) or 'already current'}")
 
 
 @app.command()

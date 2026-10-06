@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 
 from video_dataset.schemas.common import BaseSchema, ConfidenceSource
 from video_dataset.schemas.curation import HardNegative, Split, Tier
@@ -21,6 +21,7 @@ from video_dataset.schemas.vision import (
     Measurements,
     SubjectMotion,
     VisualStyle,
+    camera_fields_from_style,
 )
 
 
@@ -38,6 +39,7 @@ class FrameCaptionRecord(_Curated):
     record_type: str = "frame"
     video_id: str
     scene_id: str
+    clip_id: str | None = None  # the clip this frame belongs to (video -> clip -> frame); filled at export time
     frame_id: str
     frame_path: str
     timestamp: float
@@ -67,7 +69,8 @@ class ClipCaptionRecord(_Curated):
     end_time: float
     media_duration: float | None = None  # measured length of the clip file
     exact: bool = True  # the file covers exactly start_time..end_time (within frame_sampling.clip_tolerance_seconds)
-    description: str
+    description: str  # raw analysis description (what the analyzer saw / measured)
+    generation_prompt: str | None = None  # the same shot as a text-to-video prompt, built from the structured fields only
     actions: list[str] = Field(default_factory=list)
     camera: CameraAnnotation | None = None
     subject_motion: SubjectMotion | None = None  # measured subject motion separated from the camera motion
@@ -90,7 +93,8 @@ class SceneRecord(_Curated):
     start_time: float = Field(validation_alias=AliasChoices("start_time", "start"))
     end_time: float = Field(validation_alias=AliasChoices("end_time", "end"))
     duration: float
-    summary: str
+    summary: str  # raw analysis description
+    generation_prompt: str | None = None  # text-to-video prompt assembled from the structured fields (no free-form claims)
     environment: Environment
     objects: list[str] = Field(default_factory=list)
     object_details: list[dict[str, Any]] = Field(default_factory=list)
@@ -111,6 +115,13 @@ class SceneRecord(_Curated):
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
     hard_negatives: list[HardNegative] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _camera_from_style(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("camera"), dict):
+            data = {**data, "camera": camera_fields_from_style(data["camera"], data.get("visual_style"))}
+        return data
 
 
 class EventRecord(_Curated):

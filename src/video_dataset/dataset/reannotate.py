@@ -313,15 +313,23 @@ def push_shard(
 
 
 def update_dataset_card(config: PipelineConfig, token: str) -> str:
-    """Overwrite README.md on the Hub with the current card (loader configs now point at Parquet)."""
+    """Refresh the loader `configs:` block of README.md on the Hub (or create the card when there is
+    none). The rest of an existing card is kept. Returns the commit URL, or "" when it was current."""
     from huggingface_hub import HfApi
 
-    from video_dataset.dataset.upload import dataset_card
+    from video_dataset.dataset.upload import dataset_card, merge_card_configs
 
     cfg = config.upload
     api = HfApi(token=token)
+    if api.file_exists(cfg.repo_id, "README.md", repo_type=cfg.repo_type):
+        current = Path(api.hf_hub_download(cfg.repo_id, "README.md", repo_type=cfg.repo_type)).read_text(encoding="utf-8")
+        body = merge_card_configs(current, cfg)
+        if body == current:
+            return ""
+    else:
+        body = dataset_card(cfg, config)
     info = api.upload_file(
-        path_or_fileobj=dataset_card(cfg, config).encode("utf-8"), path_in_repo="README.md", repo_id=cfg.repo_id,
-        repo_type=cfg.repo_type, commit_message="Update dataset card: Parquet loader configs, split / tier fields",
+        path_or_fileobj=body.encode("utf-8"), path_in_repo="README.md", repo_id=cfg.repo_id,
+        repo_type=cfg.repo_type, commit_message="Update dataset card: loader configs point at the per-type Parquet files",
     )
     return str(getattr(info, "commit_url", None) or info)

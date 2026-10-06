@@ -96,18 +96,13 @@ def upgrade_records(records: dict[str, list[Any]]) -> dict[str, list[dict[str, A
 
 
 def write_typed_parquet_files(records: dict[str, list[Any]], out_dir: Path) -> dict[str, int]:
-    """One Parquet file per record type with the schema derived from its model (loader friendly)."""
+    """One Parquet file per record type with the schema derived from its model (loader friendly).
+    A type with no records still gets an (empty, typed) file so the loader configs in the dataset
+    card, which glob `shard_*/<type>.parquet`, resolve for every shard."""
     out_dir.mkdir(parents=True, exist_ok=True)
     counts: dict[str, int] = {}
     for name in DATASET_FILES:
-        rows = records.get(name, [])
-        path = out_dir / f"{name}.parquet"
-        if not rows:
-            if path.exists():
-                path.unlink()
-            counts[name] = 0
-            continue
-        counts[name] = write_typed_parquet(RECORD_MODELS[name], rows, path)
+        counts[name] = write_typed_parquet(RECORD_MODELS[name], records.get(name, []), out_dir / f"{name}.parquet")
     return counts
 
 

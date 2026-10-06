@@ -30,8 +30,20 @@ OPPOSITE_MOVEMENT: dict[CameraMovement, CameraMovement] = {
     CameraMovement.STATIC: CameraMovement.PAN_RIGHT,
     CameraMovement.HANDHELD: CameraMovement.STATIC,
     CameraMovement.TRACKING: CameraMovement.STATIC,
+    CameraMovement.TRACKING_LEFT: CameraMovement.TRACKING_RIGHT,
+    CameraMovement.TRACKING_RIGHT: CameraMovement.TRACKING_LEFT,
     CameraMovement.TRACKING_FORWARD: CameraMovement.TRACKING_BACKWARD,
     CameraMovement.TRACKING_BACKWARD: CameraMovement.TRACKING_FORWARD,
+    CameraMovement.DOLLY_IN: CameraMovement.DOLLY_OUT,
+    CameraMovement.DOLLY_OUT: CameraMovement.DOLLY_IN,
+    CameraMovement.CRANE_UP: CameraMovement.CRANE_DOWN,
+    CameraMovement.CRANE_DOWN: CameraMovement.CRANE_UP,
+    CameraMovement.CRANE: CameraMovement.STATIC,
+    CameraMovement.ORBIT_CLOCKWISE: CameraMovement.ORBIT_COUNTERCLOCKWISE,
+    CameraMovement.ORBIT_COUNTERCLOCKWISE: CameraMovement.ORBIT_CLOCKWISE,
+    CameraMovement.ORBIT: CameraMovement.STATIC,
+    CameraMovement.FPV: CameraMovement.STATIC,
+    CameraMovement.DRONE: CameraMovement.STATIC,
 }
 OPPOSITE_LIGHTING = {"dark": "bright", "dim": "bright", "normal": "dark", "bright": "dark"}
 
