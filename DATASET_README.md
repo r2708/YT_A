@@ -1,27 +1,30 @@
 ---
 license: mit
 task_categories:
-- video-classification
 - question-answering
-- text-generation
 - visual-question-answering
+- video-classification
+- image-to-text
 language:
 - en
 tags:
 - video
 - temporal-reasoning
 - multimodal
-- question-answering
 - video-language
 - youtube
-pretty_name: YouTube Video Dataset
+- video-understanding
+- temporal-qa
+- scene-understanding
+pretty_name: Temporally-Grounded YouTube Video Dataset
 size_categories:
 - 1K<n<10K
 ---
 
 # YouTube Video Dataset
 
-A temporally-grounded, multimodal dataset extracted from YouTube videos for training video-language models, temporal reasoning systems, and video question-answering models.
+A comprehensive, temporally-grounded multimodal dataset extracted from YouTube videos for training video-language models, temporal reasoning systems, and video question-answering models. This dataset provides **high-quality, evidence-backed annotations** with temporal grounding, making it ideal for training models that need to understand when and how events unfold in videos.
+
 
 ##  Dataset Contents
 
@@ -102,7 +105,32 @@ qa = load_dataset("parquet", data_files="temporal_qa.parquet", split="train")
 train_qa = qa.filter(lambda r: r["split"] == "train" and r["tier"] != "bronze")
 ```
 
-Read the Parquet files rather than the JSONL files with `load_dataset("json", ...)`: JSON type inference types a column that is null in one file as `null` and then cannot load another file where it is filled.
+## 📁 Dataset Structure
+
+### Files
+
+Each record type is available in both **Parquet** (recommended) and **JSONL** formats:
+
+```
+temporal_qa.parquet / temporal_qa.jsonl         
+scenes.parquet / scenes.jsonl                    
+frames.parquet / frames.jsonl                    
+clips.parquet / clips.jsonl                      
+events.parquet / events.jsonl                    
+video_descriptions.parquet / video_descriptions.jsonl  
+dataset.parquet / dataset.jsonl                  
+cinematic/                                      
+  ├── temporal_qa.parquet                     
+  ├── scenes.parquet                          
+  ├── frames.parquet                            
+  └── ...
+splits.json                                     
+schemas.json                                   
+statistics.json                                  
+manifest.json                                  
+```
+
+**⚠️ Important**: Use **Parquet files** for loading, not JSONL. JSON type inference can fail on nullable fields that differ between records. Parquet ensures consistent types.
 
 ## 🎯 Use Cases
 
@@ -114,7 +142,44 @@ Read the Parquet files rather than the JSONL files with `load_dataset("json", ..
 - **Multi-modal retrieval and search** - Search across video modalities
 - **Long-form video comprehension** - Understanding longer videos
 
-## 📖 Data Format
+## 💻 Quick Start
+
+### Loading the Dataset
+
+```python
+from datasets import load_dataset
+
+# Load temporal QA pairs (recommended)
+qa_dataset = load_dataset(
+    "raj270898/youtube-video-dataset",
+    data_files="temporal_qa.parquet"
+)
+
+# Filter for high-quality training data
+train_qa = qa_dataset["train"].filter(
+    lambda r: r["split"] == "train" and r["tier"] in ("gold", "silver")
+)
+
+# Load scene descriptions
+scenes = load_dataset(
+    "raj270898/youtube-video-dataset",
+    data_files="scenes.parquet"
+)
+
+# Load cinematic subset only
+cinematic_qa = load_dataset(
+    "raj270898/youtube-video-dataset",
+    data_files="cinematic/temporal_qa.parquet"
+)
+
+# Load all record types combined
+full_dataset = load_dataset(
+    "raj270898/youtube-video-dataset",
+    data_files="dataset.parquet"
+)
+```
+
+### Dataset Schema Examples
 
 ### Temporal QA Example
 
@@ -213,40 +278,72 @@ All records include:
 
 Questions are generated from timeline events (not hallucinated), ensuring high-quality, verifiable question-answer pairs.
 
-## 🏗️ Generation Process
+## 🏗️ Data Generation Pipeline
 
-Data extracted using a 12-stage pipeline:
-1. **Download** - Video acquisition
-2. **Preprocess** - Format standardization
-3. **Scene Detection** - Shot boundary detection
-4. **Frame Extraction** - Motion-aware sampling
-5. **Audio Analysis** - Sound event detection
-6. **Transcription** - Speech-to-text (Whisper)
-7. **OCR** - On-screen text extraction
-8. **Vision Analysis** - Scene understanding
-9. **Temporal Analysis** - Event timeline construction
-10. **QA Generation** - Question-answer pair creation
-11. **Validation** - Quality checks and grounding verification
-12. **Export** - Dataset compilation
+Data extracted using a comprehensive 12-stage pipeline:
 
-## 📄 License
+1. **Download** - Video acquisition from YouTube
+2. **Preprocess** - Format standardization and media info extraction
+3. **Scene Detection** - Shot boundary detection (cuts, fades, dissolves)
+4. **Frame Extraction** - Motion-aware sampling with optical flow analysis
+5. **Audio Analysis** - Sound event detection and audio segmentation
+6. **Transcription** - Speech-to-text with Whisper (word-level timestamps)
+7. **OCR** - On-screen text extraction with cross-frame tracking
+8. **Vision Analysis** - Scene understanding and visual description
+9. **Temporal Analysis** - Event timeline construction with interval relations
+10. **QA Generation** - Evidence-grounded question-answer pair creation
+11. **Validation** - Quality checks, grounding verification, confidence scoring
+12. **Export** - Dataset compilation with deduplication and quality tiers
 
-Dataset sourced from public YouTube videos. Please respect original content licenses and use responsibly for research and educational purposes.
+### Processing Features
 
-## 🔗 Citation
+- **Checkpointed per stage**: Resume from any failure point
+- **Quality control**: Confidence scoring, verification, and validation
+- **Hard negatives**: Rule-based wrong answers for contrastive learning
+- **Deduplication**: Near-duplicate detection at video, scene, and QA levels
+- **Evidence grounding**: All QA pairs linked to specific timestamps and scenes
 
-If you use this dataset, please cite:
+## 📄 License & Usage
+
+This dataset is sourced from public YouTube videos and is released under the MIT License for research and educational purposes. Please respect original content licenses when using this dataset.
+
+### Ethical Considerations
+
+- All videos are publicly available on YouTube
+- No personal information or private data is included
+- Metadata includes video titles and URLs for attribution
+- Use responsibly for research and educational purposes
+
+## 📚 Citation
+
+If you use this dataset in your research, please cite:
 
 ```bibtex
-@dataset{youtube_video_dataset,
-  title={YouTube Video Dataset},
-  author={raj270898},
+@dataset{youtube_video_temporally_grounded_dataset_2026,
+  title={Temporally-Grounded YouTube Video Dataset},
+  author={Raj Khajanchi},
   year={2026},
   publisher={Hugging Face},
-  howpublished={\url{https://huggingface.co/datasets/raj270898/youtube-video-dataset}}
+  url={https://huggingface.co/datasets/raj270898/youtube-video-dataset}
 }
 ```
 
-## 📧 Contact
+## 🔗 Related Resources
 
-For questions or issues, please open an issue on the dataset repository.
+- **Pipeline Repository**: [video-dataset-pipeline](https://github.com/raj270898/video-dataset-pipeline) (if available)
+- **Documentation**: Full pipeline documentation included in the repository
+- **Issues & Questions**: Please open an issue on the dataset repository page
+
+## 📊 Additional Information
+
+### Supported Tasks
+
+- **Visual Question Answering**: Temporal reasoning, event localization
+- **Video Captioning**: Scene descriptions, frame captions
+- **Temporal Reasoning**: Event ordering, duration estimation
+- **Action Recognition**: Event detection and classification
+- **Video Understanding**: Long-form video comprehension
+
+### Languages
+
+- English (en)
