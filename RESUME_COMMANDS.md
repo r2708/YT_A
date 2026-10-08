@@ -2,6 +2,11 @@
 
 ## If Pipeline Shuts Down or Crashes
 
+**What Gets Resumed:**
+- ✗ Failed videos - Retries from failed stage
+- 🔄 Processing videos - Continues from last checkpoint
+- ✅ Done videos - Skipped (already complete)
+
 ### Basic Resume Command
 ```bash
 cd /Users/rajkhajanchi/Desktop/YT_A && source .venv/bin/activate && video-dataset resume --workers 12
