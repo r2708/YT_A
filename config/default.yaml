@@ -27,8 +27,8 @@ download:
   allowed_domains: []      # e.g. [youtube.com, youtu.be]; empty = any http(s) site yt-dlp supports
 
 limits:
-  max_duration_seconds: 7200000   # No limit - accept any video duration (was: 7200 = 2h)
-  max_file_size_gb: null       # reject downloads whose reported size is above this (null = no limit)
+  max_duration_seconds: 3600   # 1 hour max - reject longer videos for production
+  max_file_size_gb: 2          # 2 GB max file size
   min_free_disk_gb: 5          # DOWNLOAD / PREPROCESS / FRAME_EXTRACTION refuse to start below this
   disk_check_stages: [DOWNLOAD, PREPROCESS, FRAME_EXTRACTION]
 
