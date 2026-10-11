@@ -29,7 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 asr = ["faster-whisper>=1.0"]
-ocr = ["rapidocr-onnxruntime>=1.3"]
+ocr = ["rapidocr>=3.0", "onnxruntime>=1.31"]
 ocr-easyocr = ["easyocr>=1.7"]
 vision-local = ["torch>=2.1", "transformers>=4.45", "pillow>=10.0", "accelerate>=0.30"]
 vision-cv = ["ultralytics>=8.1", "torch>=2.1", "transformers>=4.45", "pillow>=10.0"]  # vision.provider: cv_models (YOLO + CLIP)

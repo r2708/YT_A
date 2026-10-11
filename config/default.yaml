@@ -5,7 +5,7 @@ project:
   data_dir: data
   db_path: null            # default: <data_dir>/state.db
   log_level: INFO
-  device: auto             # auto | cuda | mps | cpu
+  device: cuda             # auto | cuda | mps | cpu - Force CUDA for GPU
   seed: 1234
   ffmpeg_path: null        # null -> search PATH, then the imageio-ffmpeg bundled binary
   ffprobe_path: null
@@ -27,8 +27,8 @@ download:
   allowed_domains: []      # e.g. [youtube.com, youtu.be]; empty = any http(s) site yt-dlp supports
 
 limits:
-  max_duration_seconds: 3600   # 1 hour max - reject longer videos for production
-  max_file_size_gb: 2          # 2 GB max file size
+  max_duration_seconds: null   # No limit - accept any video duration
+  max_file_size_gb: null       # No limit on file size
   min_free_disk_gb: 5          # DOWNLOAD / PREPROCESS / FRAME_EXTRACTION refuse to start below this
   disk_check_stages: [DOWNLOAD, PREPROCESS, FRAME_EXTRACTION]
 
