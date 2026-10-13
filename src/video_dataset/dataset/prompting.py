@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from video_dataset.schemas.vision import SubjectMotion
+from video_dataset.utils.text import with_article
 from video_dataset.vision.subject_motion import subject_motion_phrase
 
 _SHOT_WORDS = {"extreme_wide": "extreme wide", "wide": "wide", "medium": "medium", "close_up": "close-up", "extreme_close_up": "extreme close-up"}
@@ -31,7 +32,7 @@ def _plural(noun: str) -> str:
 
 
 def _article(noun: str) -> str:
-    return ("an " if noun[:1].lower() in "aeiou" else "a ") + noun
+    return with_article(noun)
 
 
 _TIME_PHRASES = {"day": "in daylight", "daytime": "in daylight", "daylight": "in daylight", "night": "at night", "nighttime": "at night", "evening": "in the evening", "morning": "in the morning", "afternoon": "in the afternoon"}

@@ -45,7 +45,7 @@ def test_spacy_generator_records_are_grounded_and_unique():
         assert r.evidence.event_ids and set(r.evidence.event_ids) <= ids
         assert 0.0 <= r.evidence.start_time <= r.evidence.end_time <= 48.0
         assert r.question.endswith("?") and r.answer.strip()
-        assert r.type in (QAType.TIMESTAMP, QAType.EVENT_LOCALIZATION, QAType.DURATION)
+        assert r.type in (QAType.TIMESTAMP, QAType.EVENT_LOCALIZATION, QAType.DURATION, QAType.LONG_RANGE)
     by_template = {r.template_id for r in records}
     assert {"spacy_subject_action_v1", "spacy_when_v1", "spacy_object_v1", "spacy_who_v1", "spacy_duration_v1", "spacy_speech_v1", "spacy_camera_v1"} & by_template
     car = [r for r in records if "event_0002" in r.evidence.event_ids]

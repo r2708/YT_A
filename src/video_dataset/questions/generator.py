@@ -70,6 +70,55 @@ def _difficulty(c: Candidate) -> Difficulty:
     return Difficulty.EASY
 
 
+def candidate_record(video_id: str, n: int, c: Candidate, duration: float, timeline: Timeline, generator_name: str) -> QARecord:
+    """A grounded QA record from a candidate: evidence (events, scenes, frames, relations, source
+    segments) is derived from the supporting events, confidence is their minimum."""
+    conf, src = _conf(c.events)
+    start = min([e.start_time for e in c.events] + (c.timestamps or [duration]))
+    end = max([e.end_time for e in c.events] + (c.timestamps or [0.0]))
+    frame_ids: list[str] = []
+    for e in c.events:
+        for fid in e.frame_ids:
+            if fid not in frame_ids:
+                frame_ids.append(fid)
+    frame_ids += [f for f in c.extra_frames if f not in frame_ids]
+    scene_ids: list[str] = []
+    if not c.restrict_scenes:
+        for e in c.events:
+            for sid in e.scene_ids:
+                if sid not in scene_ids:
+                    scene_ids.append(sid)
+    for sid in c.scene_ids:
+        if sid not in scene_ids:
+            scene_ids.append(sid)
+    evidence = Evidence(
+        start_time=round(max(0.0, start), 3),
+        end_time=round(min(duration, max(end, start)), 3),
+        timestamps=[round(t, 3) for t in (c.timestamps or sorted({e.start_time for e in c.events}))],
+        scene_ids=scene_ids,
+        event_ids=[e.event_id for e in c.events],
+        frame_ids=frame_ids[:16],
+        relation_ids=[r.relation_id for r in timeline.relations if {r.event_a, r.event_b} <= {e.event_id for e in c.events} and len(c.events) >= 2][:6],
+        transcript_segment_ids=[sid for e in c.events if e.event_type == EventType.SPEECH for sid in e.source_ids],
+        ocr_track_ids=[sid for e in c.events if e.event_type == EventType.TEXT_ON_SCREEN for sid in e.source_ids],
+    )
+    return QARecord(
+        question_id=make_qa_id(video_id, n),
+        video_id=video_id,
+        type=c.type,
+        question=c.question,
+        answer=c.answer,
+        evidence=evidence,
+        difficulty=_difficulty(c),
+        confidence=conf,
+        confidence_source=src,
+        generator=generator_name,
+        template_id=c.template_id,
+        options=c.options,
+        is_long_range=c.long_range,
+    )
+
+
 class TemporalQAGenerator:
     name = "template_v1"
 
@@ -107,55 +156,7 @@ class TemporalQAGenerator:
             rng.shuffle(pool)
 
         chosen = self._select(pools, target, rng)
-        records: list[QARecord] = []
-        for n, c in enumerate(chosen, start=1):
-            conf, src = _conf(c.events)
-            start = min([e.start_time for e in c.events] + (c.timestamps or [duration]))
-            end = max([e.end_time for e in c.events] + (c.timestamps or [0.0]))
-            frame_ids: list[str] = []
-            for e in c.events:
-                for fid in e.frame_ids:
-                    if fid not in frame_ids:
-                        frame_ids.append(fid)
-            frame_ids += [f for f in c.extra_frames if f not in frame_ids]
-            scene_ids: list[str] = []
-            if not c.restrict_scenes:
-                for e in c.events:
-                    for sid in e.scene_ids:
-                        if sid not in scene_ids:
-                            scene_ids.append(sid)
-            for sid in c.scene_ids:
-                if sid not in scene_ids:
-                    scene_ids.append(sid)
-            evidence = Evidence(
-                start_time=round(max(0.0, start), 3),
-                end_time=round(min(duration, max(end, start)), 3),
-                timestamps=[round(t, 3) for t in (c.timestamps or sorted({e.start_time for e in c.events}))],
-                scene_ids=scene_ids,
-                event_ids=[e.event_id for e in c.events],
-                frame_ids=frame_ids[:16],
-                relation_ids=[r.relation_id for r in timeline.relations if {r.event_a, r.event_b} <= {e.event_id for e in c.events} and len(c.events) >= 2][:6],
-                transcript_segment_ids=[sid for e in c.events if e.event_type == EventType.SPEECH for sid in e.source_ids],
-                ocr_track_ids=[sid for e in c.events if e.event_type == EventType.TEXT_ON_SCREEN for sid in e.source_ids],
-            )
-            records.append(
-                QARecord(
-                    question_id=make_qa_id(video_id, n),
-                    video_id=video_id,
-                    type=c.type,
-                    question=c.question,
-                    answer=c.answer,
-                    evidence=evidence,
-                    difficulty=_difficulty(c),
-                    confidence=conf,
-                    confidence_source=src,
-                    generator=self.name,
-                    template_id=c.template_id,
-                    options=c.options,
-                    is_long_range=c.long_range,
-                )
-            )
-        return records
+        return [candidate_record(video_id, n, c, duration, timeline, self.name) for n, c in enumerate(chosen, start=1)]
 
     # ------------------------------------------------------------------ selection
     def _select(self, pools: dict[QAType, list[Candidate]], target: int, rng: random.Random) -> list[Candidate]:

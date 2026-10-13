@@ -98,6 +98,10 @@ class FrameSamplingConfig(_Section):
     analysis_width: int = 160
     change_threshold: float = 0.12
     min_frame_gap_seconds: float = 0.5
+    # No two consecutive sampled frames of a shot may be further apart than this (frames are inserted
+    # into the largest gaps until max_frames_per_scene is reached); the validation stage checks the
+    # same limit, so a shot with fewer than max_frames_per_scene frames is never flagged for gaps.
+    max_frame_gap_seconds: float = 5.0
     jpeg_quality: int = 90
     max_frame_side: int = 1280
     compute_optical_flow: bool = True
@@ -286,8 +290,12 @@ class ValidationConfig(_Section):
     # auto: only when a CLIP model is already loaded (cv_models / clip enricher); on: load one; off.
     # (YAML / --set turn "on" / "off" into booleans; both spellings are accepted.)
     clip_alignment: str | bool = "auto"
-    clip_alignment_min_rank_fraction: float = 0.5
-    clip_alignment_min_margin: float = 0.02  # ... and the best-matching caption must beat the own one by at least this cosine margin
+    # prompt: compare the frames with the natural-language generation prompt built from the annotation
+    # (subject, setting, camera, lighting); summary: the full measurement summary (hex colours, numbers -
+    # a poor CLIP text). Shots without any detected object make no verifiable claim and are skipped.
+    clip_alignment_text: str = "prompt"
+    clip_alignment_min_rank_fraction: float = 0.75  # bottom quarter of the video's captions ...
+    clip_alignment_min_margin: float = 0.05  # ... and the best-matching caption must beat the own one by at least this cosine margin
     clip_alignment_min_candidates: int = 4  # videos with fewer captioned scenes skip the check
     clip_alignment_max_frames: int = 3
     frame_sequence_checks: bool = True  # frames of a scene must be ordered, inside the scene, without large gaps

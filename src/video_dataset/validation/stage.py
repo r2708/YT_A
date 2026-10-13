@@ -23,7 +23,7 @@ from video_dataset.stages import Stage
 from video_dataset.utils.device import resolve_device
 from video_dataset.utils.io import read_json, write_json_atomic
 from video_dataset.utils.parallel import parallel_map, stage_workers
-from video_dataset.validation.alignment import AlignmentResult, CLIPCaptionAligner, find_loaded_clip
+from video_dataset.validation.alignment import AlignmentResult, CLIPCaptionAligner, alignment_text, find_loaded_clip
 from video_dataset.validation.checks import (
     check_clips,
     check_files_exist,
@@ -47,7 +47,7 @@ def _caption_alignment(ctx: VideoContext, analyses: dict, frames_by_scene: dict[
     mode = ("on" if raw else "off") if isinstance(raw, bool) else str(raw or "auto").lower()
     if mode in ("off", "false", "0", "none"):
         return {}
-    captions = {sid: a.summary for sid, a in analyses.items() if a.summary and frames_by_scene.get(sid)}
+    captions = {sid: text for sid, a in analyses.items() if a.summary and frames_by_scene.get(sid) and (text := alignment_text(a, str(vcfg.clip_alignment_text)))}
     if len(captions) < int(vcfg.clip_alignment_min_candidates):
         return {}
     enricher = find_loaded_clip(ctx.models)
@@ -72,6 +72,11 @@ def _caption_alignment(ctx: VideoContext, analyses: dict, frames_by_scene: dict[
     except Exception as exc:
         log.warning("caption alignment failed: %s", str(exc)[:160])
         return {}
+
+
+# Providers whose descriptions are assembled from measurements and classifier/detector outputs
+# (no generative model wrote free text): accepted without a verification signal.
+MEASURED_PROVIDERS = frozenset({"heuristic", "cv_models", None})
 
 
 def _status(issues_hard: list[str], suggested: str) -> ValidationStatus:
@@ -148,7 +153,7 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         if a.errors:
             issues.append("analyzer errors: " + "; ".join(a.errors)[:200])
         quality = scene_quality(a)
-        generative = a.provider not in ("heuristic", None)
+        generative = a.provider not in MEASURED_PROVIDERS
         if generative:
             suggested = confidence_status(a.confidence, vcfg.minimum_confidence, vcfg.review_confidence)
             if a.confidence is None:
@@ -159,15 +164,24 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
             if a.verification is not None and a.verification.verdict == VerificationVerdict.UNSUPPORTED:
                 hard.append("verifier found the description unsupported")
         else:
-            suggested = "accepted"  # measured annotation; nothing to hallucinate
+            # measured annotation (pixel statistics, optical flow, detector + CLIP labels): nothing to
+            # hallucinate, so no verification signal is required; a shot without detections simply
+            # carries no object confidence. Only a *low* detector score sends it to review.
+            suggested = "accepted"
             checks["measurement_derived"] = True
+            if a.confidence is not None and a.confidence < vcfg.review_confidence:
+                issues.append(f"mean detector confidence {a.confidence:.2f} below review_confidence {vcfg.review_confidence:.2f}")
+                suggested = "review"
         if quality.description_quality is not None and quality.description_quality < 0.15:
             issues.append("low description specificity")
             if suggested == "accepted":
                 suggested = "review"
         # --- frame sequence: ordered, inside the shot, no large gaps ---------------------------
         if vcfg.frame_sequence_checks:
-            ok, msg = check_frame_sequence(frames_by_scene.get(a.scene_id, []), a.start_time, a.end_time)
+            ok, msg = check_frame_sequence(
+                frames_by_scene.get(a.scene_id, []), a.start_time, a.end_time,
+                min_gap_seconds=float(cfg.frame_sampling.max_frame_gap_seconds or 5.0), max_frames=int(cfg.frame_sampling.max_frames_per_scene),
+            )
             checks["frame_sequence"] = ok
             if not ok:
                 issues.append(msg or "frame sequence problem")
@@ -225,7 +239,7 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
     # duplicate descriptions: identical text for *different, non-overlapping* scenes is flagged (kept, not exported)
     scene_dups = dedupe_timed_texts(scene_items, cfg.deduplication.near_duplicate_threshold, 0.0, require_overlap=False) if cfg.deduplication.enabled else {}
     for vs in v_scenes:
-        if vs.analysis.scene_id in scene_dups and vs.analysis.provider not in ("heuristic",):
+        if vs.analysis.scene_id in scene_dups and vs.analysis.provider not in MEASURED_PROVIDERS:
             vs.validation.status = ValidationStatus.DUPLICATE
             vs.validation.duplicate_of = scene_dups[vs.analysis.scene_id]
             vs.validation.issues.append("description identical to another scene")

@@ -12,7 +12,7 @@ from video_dataset.schemas.transcript import AudioAnalysis, AudioEventCategory, 
 from video_dataset.schemas.vision import CameraMovement, SceneAnalysis, Setting, VisionResult
 from video_dataset.utils.ids import event_id as make_event_id
 from video_dataset.utils.logging import get_logger
-from video_dataset.utils.text import content_words, lower_first, sentence
+from video_dataset.utils.text import content_words, lower_first, sentence, with_article
 from video_dataset.utils.timecode import clamp, interval_overlap
 from video_dataset.vision.motion import MOVEMENT_PHRASES, motion_segments
 
@@ -161,7 +161,7 @@ class EventExtractor:
                         event_type=EventType.APPEARANCE,
                         start_time=scene.start_time,
                         end_time=scene.end_time,
-                        event=sentence(f"a {desc} is visible{loc}") if not desc.lower().startswith(("a ", "an ", "the ")) else sentence(f"{desc} is visible{loc}"),
+                        event=sentence(f"{with_article(desc)} is visible{loc}"),
                         entities=[obj.name],
                         action="appears",
                         scene_ids=[scene.scene_id],

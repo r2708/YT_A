@@ -99,6 +99,18 @@ def sentence(text: str) -> str:
     return text
 
 
+def with_article(noun: str) -> str:
+    """'a car', 'an umbrella' - the indefinite article chosen by the first letter (good enough for
+    object class names; 'an hour' / 'a unicorn' style exceptions are not needed here)."""
+    noun = noun.strip()
+    if not noun:
+        return noun
+    low = noun.lower()
+    if low.startswith(("a ", "an ", "the ")) or low.split()[0] in ("a", "an", "the"):
+        return noun
+    return ("an " if low[0] in "aeiou" else "a ") + noun
+
+
 def lower_first(text: str) -> str:
     text = text.strip().rstrip(".")
     return text[0].lower() + text[1:] if text else text

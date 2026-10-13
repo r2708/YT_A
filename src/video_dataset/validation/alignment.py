@@ -96,6 +96,40 @@ class CLIPCaptionAligner:
         return out
 
 
+def alignment_text(analysis: Any, mode: str = "prompt") -> str | None:
+    """The text CLIP compares with a shot's frames.
+
+    ``prompt``: the natural-language generation prompt built from the annotation ("A 3-second wide
+    shot of a car and a person outdoors in daylight, slow pan to the right, dim lighting") - the
+    measurement summary is a poor CLIP text (hex colours, numbers, a fixed sentence skeleton).
+    Shots without a detected object have nothing verifiable in them and return None, so the check
+    is skipped for them rather than judged on lighting words alone. ``summary``: the raw summary."""
+    if str(mode or "prompt").lower() != "prompt":
+        return analysis.summary or None
+    if not analysis.objects:
+        return None
+    from video_dataset.dataset.prompting import (
+        generation_prompt,  # local import: dataset -> validation would be circular
+    )
+
+    rec = {
+        "start_time": analysis.start_time,
+        "end_time": analysis.end_time,
+        "environment": analysis.environment.model_dump(mode="json"),
+        "objects": [o.name for o in analysis.objects],
+        "object_details": [o.model_dump(mode="json") for o in analysis.objects],
+        "people": analysis.people.model_dump(mode="json") if analysis.people else None,
+        "actions": list(analysis.actions),
+        "camera": analysis.camera.model_dump(mode="json"),
+        "subject_motion": analysis.subject_motion.model_dump(mode="json") if analysis.subject_motion else None,
+        "measurements": analysis.measurements.model_dump(mode="json") if analysis.measurements else {},
+    }
+    try:
+        return generation_prompt(rec) or analysis.summary or None
+    except Exception:  # a partial annotation must never break validation
+        return analysis.summary or None
+
+
 def find_loaded_clip(models: dict[str, Any]) -> Any | None:
     """A CLIP enricher already loaded by the vision stage (cv_models analyzer or the `clip` enricher)."""
     for key, obj in models.items():

@@ -39,10 +39,11 @@ def check_non_empty(text: str | None, label: str, min_words: int = 1) -> tuple[b
     return True, None
 
 
-def check_frame_sequence(frames: list[Any], start: float, end: float, tol: float = 0.05, min_gap_seconds: float = 5.0) -> tuple[bool, str | None]:
+def check_frame_sequence(frames: list[Any], start: float, end: float, tol: float = 0.05, min_gap_seconds: float = 5.0, max_frames: int | None = None) -> tuple[bool, str | None]:
     """The sampled frames of one shot must lie inside it, carry strictly increasing frame indices in
     timestamp order (no duplicates, no reordering) and leave no gap longer than max(min_gap_seconds,
-    3x the mean spacing)."""
+    3x the mean spacing). ``min_gap_seconds`` should be the sampler's ``max_frame_gap_seconds``; a shot
+    that already holds ``max_frames`` frames is not judged on gaps (the sampler could not add more)."""
     if not frames:
         return False, "no frames sampled for this shot"
     ordered = sorted(frames, key=lambda f: (f.timestamp, f.frame_index))
@@ -55,7 +56,7 @@ def check_frame_sequence(frames: list[Any], start: float, end: float, tol: float
         problems.append("duplicate frame indices")
     if any(b <= a for a, b in zip(idx, idx[1:])):
         problems.append("frame indices not increasing with time")
-    if len(ordered) >= 2:
+    if len(ordered) >= 2 and not (max_frames and len(ordered) >= max_frames):
         span = max(1e-6, end - start)
         gaps = [b.timestamp - a.timestamp for a, b in zip(ordered, ordered[1:])]
         limit = max(min_gap_seconds, 3.0 * span / len(ordered))

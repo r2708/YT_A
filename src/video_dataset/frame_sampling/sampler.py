@@ -29,6 +29,13 @@ def _far_enough(t: float, chosen: list[Candidate], gap: float) -> bool:
     return all(abs(t - c.timestamp) >= gap for c in chosen)
 
 
+def _largest_gap(scene: Scene, chosen: list[Candidate]) -> tuple[float, float]:
+    """(length, midpoint) of the widest interval between consecutive chosen frames / shot edges."""
+    pts = sorted([scene.start_time, *[c.timestamp for c in chosen], scene.end_time])
+    gaps = [(pts[i + 1] - pts[i], (pts[i] + pts[i + 1]) / 2.0) for i in range(len(pts) - 1)]
+    return max(gaps)
+
+
 def select_frames(scene: Scene, scan: SceneScan | None, cfg: FrameSamplingConfig, fps: float) -> list[Candidate]:
     duration = max(0.0, scene.duration)
     samples = scan.samples if scan else []
@@ -85,13 +92,26 @@ def select_frames(scene: Scene, scan: SceneScan | None, cfg: FrameSamplingConfig
                 if len(chosen) >= max_frames:
                     break
 
-    # 3) uniform fill up to min_frames, always inserting into the largest temporal gap
+    # 3) coverage: no two consecutive frames further apart than max_frame_gap_seconds (the validation
+    #    stage checks the same limit); frames go into the largest gap first, until max_frames is reached.
+    #    They outrank motion peaks (priority 1) so the trim below never reopens a gap.
+    max_gap = float(getattr(cfg, "max_frame_gap_seconds", 0.0) or 0.0)
+    guard = 0
+    while max_gap > 0 and len(chosen) < max_frames and guard < 200:
+        guard += 1
+        gap, t = _largest_gap(scene, chosen)
+        if gap <= max_gap:
+            break
+        before = len(chosen)
+        add(t, SamplingReason.UNIFORM, priority=2)
+        if len(chosen) == before:
+            break
+
+    # 4) uniform fill up to min_frames, always inserting into the largest temporal gap
     guard = 0
     while len(chosen) < min_frames and guard < 50:
         guard += 1
-        pts = sorted([scene.start_time, *[c.timestamp for c in chosen], scene.end_time])
-        gaps = [(pts[i + 1] - pts[i], (pts[i] + pts[i + 1]) / 2.0) for i in range(len(pts) - 1)]
-        gap, t = max(gaps)
+        gap, t = _largest_gap(scene, chosen)
         if gap < min_gap:
             break
         before = len(chosen)
@@ -99,7 +119,7 @@ def select_frames(scene: Scene, scan: SceneScan | None, cfg: FrameSamplingConfig
         if len(chosen) == before:
             break
 
-    # 4) trim to max_frames by priority, then restore temporal order
+    # 5) trim to max_frames by priority, then restore temporal order
     if len(chosen) > max_frames:
         chosen.sort(key=lambda c: (-c.priority, -(c.change or 0.0)))
         chosen = chosen[:max_frames]

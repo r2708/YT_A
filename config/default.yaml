@@ -62,6 +62,7 @@ frame_sampling:
   analysis_width: 160
   change_threshold: 0.12   # normalized visual change that earns an extra frame
   min_frame_gap_seconds: 0.5
+  max_frame_gap_seconds: 5.0  # frames are added into the largest gaps of a shot until none exceeds this (validation checks the same limit)
   jpeg_quality: 90
   max_frame_side: 1280
   compute_optical_flow: true
@@ -69,7 +70,7 @@ frame_sampling:
   clip_max_duration: 30.0
   clip_codec: auto         # auto (stream-copy, re-encode clips that miss the boundary) | libx264 (always exact) | copy (keyframe aligned only)
   clip_tolerance_seconds: 0.25  # a clip whose real length differs from the scene by more than this is re-cut (auto) or flagged (copy)
-  clip_max_height: 720     # re-encoded clips are downscaled to this height
+  clip_max_height: 1080   # re-encoded clips are downscaled to this height
   workers: null            # threads for frame extraction + clip cutting; null -> pipeline.stage_workers
   drop_duplicate_frames: true   # sampled frames whose perceptual hash matches an earlier frame of the scene are dropped
   duplicate_frame_hamming: 4    # dHash bits that may differ for two frames to count as the same image
@@ -217,8 +218,9 @@ validation:
   consistency_checks: true # contradictory annotations (static camera + tracked subject, dark label on a bright frame, ...)
   reject_contradictions: true  # true: such shots are rejected; false: sent to review
   clip_alignment: auto     # auto (when CLIP is already loaded) | on | off - caption vs frames retrieval check
-  clip_alignment_min_rank_fraction: 0.5  # the shot's own caption must rank in the top half of the video's captions ...
-  clip_alignment_min_margin: 0.02        # ... unless the best caption beats it by less than this cosine margin (noise)
+  clip_alignment_text: prompt  # prompt (natural-language generation prompt of the shot) | summary (measurement summary with hex colours)
+  clip_alignment_min_rank_fraction: 0.75 # the shot's own caption must rank in the top three quarters of the video's captions ...
+  clip_alignment_min_margin: 0.05        # ... unless the best caption beats it by less than this cosine margin (noise)
   clip_alignment_min_candidates: 4
   clip_alignment_max_frames: 3
   frame_sequence_checks: true  # frames ordered, inside the shot, no large gaps

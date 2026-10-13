@@ -11,11 +11,12 @@ timestamps do not answer.
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from video_dataset.questions.generator import _conf
-from video_dataset.questions.ocr_filter import unusable_text_events
+from video_dataset.questions.generator import TemporalQAGenerator, _conf, candidate_record
+from video_dataset.questions.ocr_filter import looks_like_text, unusable_text_events
 from video_dataset.schemas.events import Event, EventType, Timeline
 from video_dataset.schemas.qa import Difficulty, Evidence, QARecord, QAType
 from video_dataset.schemas.scene import Scene
@@ -39,6 +40,38 @@ log = get_logger("questions.spacy")
 INSTALL_HINT = "pip install 'video-dataset-pipeline[qa-spacy]' && python -m spacy download en_core_web_sm"
 LOCATION_PREPS = {"in", "at", "on", "near", "inside", "outside", "along", "through", "under", "over", "behind", "beside", "across", "into", "onto", "by"}
 ENTITY_WORDS = {"PERSON": "person", "GPE": "place", "LOC": "location", "ORG": "organization", "DATE": "date", "TIME": "time", "MONEY": "amount of money", "PRODUCT": "product", "EVENT": "event", "WORK_OF_ART": "title", "NORP": "group"}
+_NUMERIC_LABELS = frozenset({"DATE", "TIME", "MONEY"})
+_CASE_SENSITIVE_LABELS = frozenset({"PERSON", "ORG", "NORP", "PRODUCT", "EVENT", "WORK_OF_ART"})
+_CAMEL = re.compile(r"[a-z][A-Z]")
+_DIGIT = re.compile(r"\d")
+_ENT_STRIP = "\"'.,;:!?()[]"
+LONG_RANGE_SHARE = 0.2  # share of a video's question target reserved for long-range (whole-video) questions
+
+
+def usable_entity(text: str, label: str, *, full_text: str | None = None) -> bool:
+    """Is a spaCy entity found in OCR / ASR text fit to be an answer?
+
+    NER on on-screen fragments and transcripts is noisy: a truncated word becomes a PERSON, an
+    all-caps heading an ORG, "a few seconds" a TIME. Keep entities that are at least three letters,
+    at most four whole tokens, word-shaped (no run-together or camel-case OCR), carry a digit when
+    the label is a date / time / amount, are not all-caps for labels that need casing, and are not
+    simply the entire text (the plain "what text is shown" question already covers that)."""
+    ent = text.strip().strip(_ENT_STRIP)
+    has_letters = any(ch.isalpha() for ch in ent)
+    if len(ent) < 3 or not (has_letters or label in _NUMERIC_LABELS):
+        return False
+    tokens = ent.split()
+    if len(tokens) > 4 or any(len(t.strip(_ENT_STRIP)) < 2 and not t.isdigit() for t in tokens):
+        return False
+    if _CAMEL.search(ent) or any(ch in ent for ch in ":|_/\\@#()[]{}"):
+        return False
+    if has_letters and not looks_like_text(ent, min_chars=3):
+        return False
+    if label in _NUMERIC_LABELS and not _DIGIT.search(ent):
+        return False
+    if label in _CASE_SENSITIVE_LABELS and ent.isupper():
+        return False
+    return full_text is None or normalize_text(ent) != normalize_text(full_text)
 
 
 @dataclass
@@ -161,14 +194,16 @@ class SpacyQAGenerator:
             quoted = (e.attributes.get("text") or "").strip()
             if quoted:
                 out.append(_Cand(QAType.TIMESTAMP, f"What does the speaker say {at}?", sentence(f'the speaker says "{quoted}"'), "spacy_speech_v1", [t], easy))
-                for text, label in self.parse(quoted).entities[:2]:
-                    out.append(_Cand(QAType.TIMESTAMP, f"Which {ENTITY_WORDS[label]} is mentioned in the speech {at}?", sentence(text), "spacy_speech_entity_v1", [t], medium))
+                ents = [(x, lab) for x, lab in self.parse(quoted).entities if usable_entity(x, lab)]
+                for text, label in ents[:2]:
+                    out.append(_Cand(QAType.TIMESTAMP, f"Which {ENTITY_WORDS[label]} is mentioned in the speech {at}?", sentence(text.strip().strip(_ENT_STRIP)), "spacy_speech_entity_v1", [t], medium))
             return out
         if e.event_type == EventType.TEXT_ON_SCREEN:
             text = (e.attributes.get("text") or "").strip() or e.event.rstrip(".")
             out.append(_Cand(QAType.TIMESTAMP, f"What text is shown on screen {at}?", sentence(text), "spacy_ocr_v1", [t], easy))
-            for ent, label in self.parse(text).entities[:1]:
-                out.append(_Cand(QAType.TIMESTAMP, f"Which {ENTITY_WORDS[label]} appears in the on-screen text {at}?", sentence(ent), "spacy_ocr_entity_v1", [t], medium))
+            ents = [(x, lab) for x, lab in self.parse(text).entities if usable_entity(x, lab, full_text=text)]
+            for ent, label in ents[:1]:
+                out.append(_Cand(QAType.TIMESTAMP, f"Which {ENTITY_WORDS[label]} appears in the on-screen text {at}?", sentence(ent.strip().strip(_ENT_STRIP)), "spacy_ocr_entity_v1", [t], medium))
             return out
         if e.event_type == EventType.CAMERA:
             out.append(_Cand(QAType.TIMESTAMP, f"How does the camera move {at}?", sentence(e.event), "spacy_camera_v1", [t], easy))
@@ -214,6 +249,33 @@ class SpacyQAGenerator:
         target = max(int(self.cfg.min_questions), min(int(self.cfg.max_questions), target))
         per_event = max(1, int(getattr(self.cfg, "spacy_max_per_event", 3)))
 
+        # long-range (whole-video) questions: the same entity far apart in time, counts of separate
+        # appearances. The timeline already holds these relations; the template generator's candidates
+        # are reused and a share of the target is reserved for them so they survive the cut below.
+        by_id = {e.event_id: e for e in timeline.events if e.event_id not in skip}
+        long_cands = TemporalQAGenerator(self.cfg)._long_range(timeline, by_id, duration)
+        rng.shuffle(long_cands)
+        seen_long: set[str] = set()
+        long_kept = []
+        for c in long_cands:
+            key = f"{c.type}|{normalize_text(c.question)}"
+            if key not in seen_long:
+                seen_long.add(key)
+                long_kept.append(c)
+        n_long = min(len(long_kept), max(1, int(round(target * LONG_RANGE_SHARE)))) if long_kept else 0
+        usage: dict[str, int] = {}  # questions per event, shared with the per-event loop below (spacy_max_per_event)
+        selected_long = []
+        for c in long_kept:
+            if len(selected_long) >= n_long:
+                break
+            if any(usage.get(e.event_id, 0) >= per_event for e in c.events):
+                continue
+            selected_long.append(c)
+            for e in c.events:
+                usage[e.event_id] = usage.get(e.event_id, 0) + 1
+        long_kept = selected_long
+        target_events = max(1, target - len(long_kept))
+
         seen: set[str] = set()
         chosen: list[tuple[Event, _Cand]] = []
         for e in events:
@@ -223,7 +285,7 @@ class SpacyQAGenerator:
                 log.warning("spaCy parse failed for %s (%s)", e.event_id, str(exc)[:120])
                 continue
             rng.shuffle(cands)
-            kept = 0
+            kept = usage.get(e.event_id, 0)
             for c in cands:
                 key = f"{c.type}|{normalize_text(c.question)}"
                 if key in seen:
@@ -233,17 +295,17 @@ class SpacyQAGenerator:
                 kept += 1
                 if kept >= per_event:
                     break
-        if len(chosen) > target:
+        if len(chosen) > target_events:
             rng.shuffle(chosen)
-            chosen = chosen[:target]
+            chosen = chosen[:target_events]
         chosen.sort(key=lambda ec: (ec[0].start_time, ec[0].event_id, str(ec[1].type)))
 
         records: list[QARecord] = []
-        for n, (e, c) in enumerate(chosen, start=1):
+        for e, c in chosen:
             conf, src = _conf([e])
             records.append(
                 QARecord(
-                    question_id=make_qa_id(video_id, n),
+                    question_id=make_qa_id(video_id, 0),
                     video_id=video_id,
                     type=c.type,
                     question=c.question,
@@ -266,5 +328,10 @@ class SpacyQAGenerator:
                     is_long_range=False,
                 )
             )
-        log.info("spaCy generated %d questions from %d events (target %d)", len(records), len(events), target)
+        for c in long_kept:
+            rec = candidate_record(video_id, 0, c, duration, timeline, self.name)
+            records.append(rec.model_copy(update={"template_id": f"spacy_{c.template_id}", "is_long_range": True}))
+        records.sort(key=lambda r: (r.evidence.start_time, r.evidence.event_ids[0] if r.evidence.event_ids else "", str(r.type)))
+        records = [r.model_copy(update={"question_id": make_qa_id(video_id, n), "record_id": make_qa_id(video_id, n)}) for n, r in enumerate(records, start=1)]
+        log.info("spaCy generated %d questions (%d long-range) from %d events (target %d)", len(records), len(long_kept), len(events), target)
         return records
