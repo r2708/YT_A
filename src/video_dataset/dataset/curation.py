@@ -1,4 +1,5 @@
-"""Curation of exported records: split assignment, quality tiers and the cinematic subset.
+"""Curation of exported records: split assignment, quality tiers, subsets, duplicate-video handling,
+sequences and prompt variants.
 
 Everything here works on plain record dicts (the JSON form of the record schemas) so the same
 code annotates fresh per-video exports and records merged back from earlier final files.
@@ -9,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from video_dataset.config import CinematicSubsetConfig, ExportConfig, SplitConfig, TierConfig
+from video_dataset.config import CinematicSubsetConfig, ExportConfig, LicensingConfig, SplitConfig, TierConfig
 from video_dataset.schemas.common import ConfidenceSource
 from video_dataset.schemas.curation import Split, Tier
 from video_dataset.schemas.quality import ValidationStatus
@@ -25,6 +26,7 @@ _TRUSTED_CONFIDENCE = {
     ConfidenceSource.INTERVAL_ALGEBRA,
     ConfidenceSource.DERIVED_MIN,
 }
+LICENSED_SUBSET = "licensed"
 
 
 # ------------------------------------------------------------------------------------ split
@@ -80,6 +82,15 @@ def tier_for_record(rec: dict[str, Any], cfg: TierConfig) -> tuple[Tier | None, 
     return Tier.BRONZE, reasons
 
 
+def cap_tier(tier: Tier | None, cap: Tier, reasons: list[str], reason: str) -> tuple[Tier | None, list[str]]:
+    """Lower ``tier`` to ``cap`` when it is above it, recording why."""
+    if tier is not None and _TIER_ORDER[tier] > _TIER_ORDER[cap]:
+        return cap, [*reasons, reason]
+    if tier is not None and reason not in reasons and _TIER_ORDER[tier] <= _TIER_ORDER[cap] and tier != cap:
+        return tier, reasons
+    return tier, reasons
+
+
 def tier_at_least(tier: str | None, minimum: str) -> bool:
     if tier is None:
         return False
@@ -110,6 +121,10 @@ def scene_is_cinematic(scene: dict[str, Any], cfg: CinematicSubsetConfig) -> tup
     sharp = m.get("sharpness")
     if float(cfg.min_sharpness) > 0 and sharp is not None and float(sharp) < float(cfg.min_sharpness):
         why.append("soft_focus")
+    if scene.get("quality_flags"):
+        why.append("quality_flags")
+    if scene.get("canonical_video_id"):
+        why.append("near_duplicate_video")
     return not why, why
 
 
@@ -130,25 +145,108 @@ def _record_scene_ids(kind: str, rec: dict[str, Any]) -> list[str]:
     return [str(s) for s in (rec.get("scene_ids") or [])]
 
 
-# ------------------------------------------------------------------------------------ driver
-def annotate_records(records: dict[str, list[dict[str, Any]]], cfg: ExportConfig) -> dict[str, int]:
-    """Fill split / tier / tier_reasons / subsets on every record dict in place.
+# ------------------------------------------------------------------------------------ video info
+def video_info_from_manifests(manifests: list[dict[str, Any]], similarity_threshold: float = 0.8, fingerprint_enabled: bool = True) -> dict[str, dict[str, Any]]:
+    """Per-video curation facts gathered from the per-video manifests: license status, source quality
+    flags and the canonical video id of near-duplicates (from the stored fingerprints, plus what the
+    FRAME_EXTRACTION stage already noticed against the state DB)."""
+    from video_dataset.deduplication.videos import near_duplicate_videos
 
-    Returns counts: {"cinematic": n_records_in_subset, "cinematic_scenes": n_scenes}.
+    info: dict[str, dict[str, Any]] = {}
+    fingerprints: dict[str, list[str]] = {}
+    for m in manifests:
+        vid = m.get("video_id")
+        if not vid:
+            continue
+        info[str(vid)] = {
+            "license_status": m.get("license_status"),
+            "quality_flags": list(m.get("quality_flags") or []),
+            "canonical_video_id": m.get("near_duplicate_of") or None,
+        }
+        if m.get("fingerprint"):
+            fingerprints[str(vid)] = list(m["fingerprint"])
+    if fingerprint_enabled and len(fingerprints) > 1:
+        for vid, canon in near_duplicate_videos(fingerprints, similarity_threshold).items():
+            info.setdefault(vid, {})["canonical_video_id"] = canon
+    # resolve chains (a -> b -> c) and never let a video be its own canonical
+    for vid, d in info.items():
+        canon = d.get("canonical_video_id")
+        seen = {vid}
+        while canon and canon in info and info[canon].get("canonical_video_id") and canon not in seen:
+            seen.add(canon)
+            canon = info[canon]["canonical_video_id"]
+        d["canonical_video_id"] = canon if canon and canon != vid else None
+    return info
+
+
+# ------------------------------------------------------------------------------------ driver
+def annotate_records(
+    records: dict[str, list[dict[str, Any]]],
+    cfg: ExportConfig,
+    video_info: dict[str, dict[str, Any]] | None = None,
+    licensing: LicensingConfig | None = None,
+    seed: int | str = 1234,
+) -> dict[str, int]:
+    """Fill split / tier / tier_reasons / subsets / canonical_video_id on every record dict in place,
+    link frames to their clip, attach generation prompts (+ variants) to scene / clip records and
+    (re)build the ``sequences`` records.
+
+    ``video_info`` (per video id): ``canonical_video_id`` for near-duplicate videos (their records
+    get the canonical video's split and a bronze cap), ``license_status`` (the ``licensed`` subset)
+    and ``quality_flags`` of the source. Returns counts.
     """
-    for rows in records.values():
+    from video_dataset.dataset.prompting import fill_frame_clip_ids, fill_generation_prompts
+    from video_dataset.dataset.sequences import build_sequences
+    from video_dataset.dataset.variations import fill_prompt_variants
+
+    video_info = video_info or {}
+    allowed = {str(a).lower() for a in ((licensing.allowed if licensing else []) or [])}
+    licensed_subset = bool(licensing.subset) if licensing else True
+
+    fill_frame_clip_ids(records)
+    fill_generation_prompts(records)
+    records["sequences"] = build_sequences(records, cfg.sequences) if cfg.sequences.enabled else []
+    fill_prompt_variants(records, int(cfg.prompt_variants), seed)
+
+    counts = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0}
+    dup_videos: set[str] = set()
+    licensed_videos: set[str] = set()
+    for kind, rows in list(records.items()):
+        kept_rows: list[dict[str, Any]] = []
         for rec in rows:
             vid = str(rec.get("video_id") or "")
-            rec["split"] = split_for_video(vid, cfg.split).value if cfg.split.enabled and vid else None
+            vinfo = video_info.get(vid, {})
+            canonical = vinfo.get("canonical_video_id") or None
+            if canonical == vid:
+                canonical = None
+            rec["canonical_video_id"] = canonical
+            if canonical:
+                dup_videos.add(vid)
+                if cfg.exclude_duplicate_videos:
+                    counts["dropped_duplicate_records"] += 1
+                    continue
+            split_id = canonical or vid
+            rec["split"] = split_for_video(split_id, cfg.split).value if cfg.split.enabled and split_id else None
             if cfg.tiers.enabled:
                 tier, reasons = tier_for_record(rec, cfg.tiers)
+                if canonical:
+                    tier, reasons = cap_tier(tier, Tier.BRONZE, reasons, "near_duplicate_video")
+                if rec.get("quality_flags"):
+                    tier, reasons = cap_tier(tier, Tier.SILVER, reasons, "quality_flags")
                 rec["tier"] = tier.value if tier else None
                 rec["tier_reasons"] = reasons
             else:
                 rec["tier"] = None
                 rec["tier_reasons"] = []
             rec["subsets"] = []
-    counts = {"cinematic": 0, "cinematic_scenes": 0}
+            status = str(vinfo.get("license_status") or "").lower()
+            if licensed_subset and status and status in allowed:
+                rec["subsets"].append(LICENSED_SUBSET)
+                licensed_videos.add(vid)
+            kept_rows.append(rec)
+        records[kind] = kept_rows
+    counts["duplicate_videos"] = len(dup_videos)
+    counts["licensed_videos"] = len(licensed_videos)
     if not cfg.cinematic.enabled:
         return counts
     good = cinematic_scene_ids(records, cfg.cinematic)
@@ -158,7 +256,7 @@ def annotate_records(records: dict[str, list[dict[str, Any]]], cfg: ExportConfig
             sids = _record_scene_ids(kind, rec)
             vid = str(rec.get("video_id"))
             if sids and all((vid, s) in good for s in sids):
-                rec["subsets"] = ["cinematic"]
+                rec["subsets"] = [*rec["subsets"], "cinematic"]
                 counts["cinematic"] += 1
     return counts
 

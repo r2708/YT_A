@@ -23,17 +23,55 @@ from video_dataset.stages import Stage
 from video_dataset.utils.device import resolve_device
 from video_dataset.utils.io import read_json, write_json_atomic
 from video_dataset.utils.parallel import parallel_map, stage_workers
+from video_dataset.validation.alignment import AlignmentResult, CLIPCaptionAligner, find_loaded_clip
 from video_dataset.validation.checks import (
+    check_clips,
     check_files_exist,
+    check_frame_sequence,
     check_ids_exist,
     check_non_empty,
     check_timespan,
     confidence_status,
 )
+from video_dataset.validation.consistency import check_scene_consistency
 from video_dataset.validation.grounding import answer_grounding_score, numeric_grounding_score
-from video_dataset.validation.quality import event_quality, qa_quality, relation_quality, scene_quality
+from video_dataset.validation.quality import event_quality, qa_quality, relation_quality, scene_quality, scene_quality_flags
 from video_dataset.validation.verifier import create_verifier
 from video_dataset.vision.base import AnalysisContext
+
+
+def _caption_alignment(ctx: VideoContext, analyses: dict, frames_by_scene: dict[str, list], log) -> dict[str, AlignmentResult]:  # type: ignore[no-untyped-def]
+    """CLIP caption-vs-frames ranks for every captioned scene, or {} when disabled / unavailable."""
+    vcfg = ctx.config.validation
+    raw = vcfg.clip_alignment
+    mode = ("on" if raw else "off") if isinstance(raw, bool) else str(raw or "auto").lower()
+    if mode in ("off", "false", "0", "none"):
+        return {}
+    captions = {sid: a.summary for sid, a in analyses.items() if a.summary and frames_by_scene.get(sid)}
+    if len(captions) < int(vcfg.clip_alignment_min_candidates):
+        return {}
+    enricher = find_loaded_clip(ctx.models)
+    if enricher is None and mode in ("on", "true", "1", "always"):
+        def _load():  # type: ignore[no-untyped-def]
+            from video_dataset.vision.enrichers.clip import CLIPZeroShotEnricher
+
+            device = resolve_device(ctx.config.vision.device or ctx.config.project.device)
+            log.info("loading CLIP %s for caption alignment", ctx.config.vision.clip_model)
+            return CLIPZeroShotEnricher(ctx.config.vision.clip_model, device, aesthetic=None)
+
+        try:
+            enricher = ctx.get_model(f"clip_aligner:{ctx.config.vision.clip_model}", _load)
+        except Exception as exc:
+            log.warning("caption alignment skipped: CLIP could not be loaded (%s)", str(exc)[:160])
+            return {}
+    if enricher is None:
+        log.debug("caption alignment skipped: no CLIP model loaded (validation.clip_alignment=auto)")
+        return {}
+    try:
+        return CLIPCaptionAligner(enricher).align({sid: [Path(f.frame_path) for f in frs] for sid, frs in frames_by_scene.items()}, captions, int(vcfg.clip_alignment_max_frames))
+    except Exception as exc:
+        log.warning("caption alignment failed: %s", str(exc)[:160])
+        return {}
 
 
 def _status(issues_hard: list[str], suggested: str) -> ValidationStatus:
@@ -67,6 +105,13 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
     frames_by_scene: dict[str, list] = {}
     for f in sampling.frames:
         frames_by_scene.setdefault(f.scene_id, []).append(f)
+    clips_by_scene: dict[str, list] = {}
+    for c in sampling.clips:
+        clips_by_scene.setdefault(c.scene_id, []).append(c)
+    try:
+        video_flags = list(ctx.media_info.quality_flags)
+    except FileNotFoundError:
+        video_flags = []
 
     analyzer = ctx.models.get(f"vision:{cfg.vision.provider}:{cfg.vision.model}")
     device = resolve_device(cfg.vision.device or cfg.project.device)
@@ -120,9 +165,63 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
             issues.append("low description specificity")
             if suggested == "accepted":
                 suggested = "review"
+        # --- frame sequence: ordered, inside the shot, no large gaps ---------------------------
+        if vcfg.frame_sequence_checks:
+            ok, msg = check_frame_sequence(frames_by_scene.get(a.scene_id, []), a.start_time, a.end_time)
+            checks["frame_sequence"] = ok
+            if not ok:
+                issues.append(msg or "frame sequence problem")
+                if suggested == "accepted":
+                    suggested = "review"
+        # --- clip files: present, readable, matching the shot span -----------------------------
+        if vcfg.clip_checks and clips_by_scene.get(a.scene_id):
+            missing, corrupt, inexact = check_clips(clips_by_scene[a.scene_id], float(cfg.frame_sampling.clip_tolerance_seconds or 0.25))
+            checks["clip_files_exist"] = not missing and not corrupt
+            checks["clip_duration_exact"] = not inexact
+            if missing:
+                (hard if vcfg.reject_on_missing_files else issues).append("missing clip files: " + ", ".join(missing[:3]))
+            if corrupt:
+                (hard if vcfg.reject_on_missing_files else issues).append("unreadable clip files: " + ", ".join(corrupt[:3]))
+            if inexact:
+                issues.append("clip length differs from the shot: " + "; ".join(inexact[:3]))
+                if suggested == "accepted":
+                    suggested = "review"
+        # --- measured visual quality -----------------------------------------------------------
+        flags = scene_quality_flags(a.measurements, video_flags, cfg.quality)
+        a.quality_flags = flags
+        checks["visual_quality"] = not flags
+        if flags:
+            (hard if cfg.quality.reject_flagged else issues).append("visual quality: " + ", ".join(flags))
+            if suggested == "accepted":
+                suggested = "review"
+        # --- cross-field consistency (annotation vs measurement, caption vs camera field) --------
+        if vcfg.consistency_checks:
+            c_hard, c_soft = check_scene_consistency(a)
+            checks["consistent"] = not c_hard
+            (hard if vcfg.reject_contradictions else issues).extend("contradiction: " + x for x in c_hard)
+            issues.extend("inconsistency: " + x for x in c_soft)
+            if (c_hard or c_soft) and suggested == "accepted":
+                suggested = "review"
         v_scenes.append(ValidatedScene(analysis=a, validation=ValidationInfo(status=_status(hard, suggested), issues=hard + issues, checks=checks, verifier_score=a.verification.score if a.verification else None), quality=quality))
         if a.summary:
             scene_items.append((a.scene_id, a.summary, a.start_time, a.end_time))
+    # --- caption <-> frames alignment (CLIP retrieval rank among the video's own captions) --------
+    alignment = _caption_alignment(ctx, analyses, frames_by_scene, log)
+    n_misaligned = 0
+    for vs in v_scenes:
+        res = alignment.get(vs.analysis.scene_id)
+        if res is None:
+            continue
+        ok = not res.misaligned(float(vcfg.clip_alignment_min_rank_fraction), float(vcfg.clip_alignment_min_margin))
+        vs.validation.checks["caption_alignment"] = ok
+        vs.analysis.enrichments["caption_alignment"] = {"clip_score": res.score, "rank": res.rank, "candidates": res.candidates, "best_other": res.best_other, "best_score": res.best_score, "margin": res.margin}
+        if not ok:
+            n_misaligned += 1
+            vs.validation.issues.append(f"caption ranks {res.rank} of {res.candidates} by CLIP similarity to its own frames (margin {res.margin:.3f}" + (f", best match: {res.best_other})" if res.best_other else ")"))
+            if vs.validation.status == ValidationStatus.ACCEPTED:
+                vs.validation.status = ValidationStatus.REVIEW
+    if alignment:
+        log.info("caption alignment: %d of %d scenes rank below the top %.0f%% of their video's captions", n_misaligned, len(alignment), float(vcfg.clip_alignment_min_rank_fraction) * 100)
     # duplicate descriptions: identical text for *different, non-overlapping* scenes is flagged (kept, not exported)
     scene_dups = dedupe_timed_texts(scene_items, cfg.deduplication.near_duplicate_threshold, 0.0, require_overlap=False) if cfg.deduplication.enabled else {}
     for vs in v_scenes:
@@ -320,6 +419,10 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         "events_verified_now": n_verified,
         "verifier": verifier.name,
         "verify_workers": v_workers,
+        "scenes_quality_flagged": sum(1 for v in v_scenes if v.analysis.quality_flags),
+        "scenes_contradictory": sum(1 for v in v_scenes if v.validation.checks.get("consistent") is False),
+        "scenes_caption_misaligned": n_misaligned,
+        "video_quality_flags": video_flags,
     }
     validated = ValidatedVideo(video_id=ctx.video_id, duration=duration, scenes=v_scenes, events=v_events, relations=v_relations, qa=qa.questions, summary=summary)
     out = ctx.paths.validated_file(ctx.video_id)

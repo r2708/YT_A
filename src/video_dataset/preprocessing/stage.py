@@ -35,6 +35,28 @@ def preprocess_stage(ctx: VideoContext) -> StageOutput:
     if info.duration <= 0:
         raise ValueError("video duration is zero or unknown; file is probably corrupt")
 
+    # --- duration vs the source's own claim, resolution / bitrate of the source: measured flags ---
+    qcfg = cfg.quality
+    flags: list[str] = []
+    meta_duration: float | None = None
+    mismatch: float | None = None
+    try:
+        meta_duration = ctx.metadata.duration
+    except FileNotFoundError:
+        meta_duration = None
+    if meta_duration:
+        mismatch = round(abs(float(info.duration) - float(meta_duration)), 3)
+        if mismatch > float(qcfg.duration_tolerance_seconds):
+            flags.append("duration_mismatch")
+            log.warning("probed duration %.1fs differs from the reported %.1fs by %.1fs", info.duration, meta_duration, mismatch)
+    if int(qcfg.min_height) > 0 and src_info.height < int(qcfg.min_height):
+        flags.append("low_resolution")
+    if float(qcfg.min_bitrate_kbps) > 0 and src_info.bitrate and src_info.bitrate / 1000.0 < float(qcfg.min_bitrate_kbps):
+        flags.append("low_bitrate")
+    info = info.model_copy(update={"metadata_duration": meta_duration, "duration_mismatch_seconds": mismatch, "quality_flags": flags})
+    if flags:
+        log.info("source quality flags: %s", ", ".join(flags))
+
     has_audio = False
     wav = ctx.paths.audio_file(ctx.video_id)
     if src_info.has_audio or not info.video_codec:  # unknown -> try
@@ -59,6 +81,8 @@ def preprocess_stage(ctx: VideoContext) -> StageOutput:
             "codec": info.video_codec,
             "has_audio": has_audio,
             "transcoded": transcoded,
+            "quality_flags": flags,
+            "duration_mismatch_seconds": mismatch,
         },
         message=f"{info.width}x{info.height} @ {info.fps:.2f} fps, {info.duration:.1f}s, audio={'yes' if has_audio else 'no'}",
     )

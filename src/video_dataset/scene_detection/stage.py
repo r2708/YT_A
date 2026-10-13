@@ -15,9 +15,10 @@ def scene_detection_stage(ctx: VideoContext) -> StageOutput:
     write_json_atomic(out, result)
     n_split = sum(1 for s in result.scenes if s.transition_in == "split")
     n_fade = sum(1 for s in result.scenes if s.transition_in == "fade")
-    ctx.logger(Stage.SCENE_DETECTION).info("%d scenes (%d fades, %d artificial splits)", len(result.scenes), n_fade, n_split)
+    n_dissolve = sum(1 for s in result.scenes if s.transition_in == "dissolve")
+    ctx.logger(Stage.SCENE_DETECTION).info("%d scenes (%d fades, %d dissolves, %d artificial splits)", len(result.scenes), n_fade, n_dissolve, n_split)
     return StageOutput(
         artifact_path=str(out),
-        metrics={"scenes": len(result.scenes), "fades": n_fade, "splits": n_split, "detector": result.detector},
+        metrics={"scenes": len(result.scenes), "fades": n_fade, "dissolves": n_dissolve, "splits": n_split, "detector": result.detector},
         message=f"{len(result.scenes)} scenes detected",
     )

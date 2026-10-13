@@ -57,7 +57,9 @@ class MockVisionAnalyzer(VisionAnalyzer):
             environment=Environment(location=_LOCATIONS[idx % len(_LOCATIONS)], setting=Setting.INDOOR if idx % 2 == 0 else Setting.OUTDOOR, lighting="even", time_of_day="day" if idx % 3 else "night"),
             objects=[ObjectAnnotation(name=obj, attributes=obj.split()[:1], location="center")],
             actions=[_ACTIONS[idx % len(_ACTIONS)]],
-            camera=CameraAnnotation(shot_type=ShotType.WIDE, movement=CameraMovement.STATIC),
+            # movement is left unknown: the vision stage fills it from the measured optical flow, so the
+            # mock never contradicts the measurement (a VLM that did would be rejected by validation)
+            camera=CameraAnnotation(shot_type=ShotType.WIDE, movement=CameraMovement.UNKNOWN),
             visual_style=VisualStyle(composition="centered subject", lighting="flat, even lighting", color="saturated primary colours"),
             temporal_progression=f"The {obj} moves across the frame during the shot.",
             frame_ids=[f.frame_id for f in frames],

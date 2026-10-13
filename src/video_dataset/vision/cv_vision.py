@@ -26,7 +26,8 @@ from video_dataset.vision.enrichers.clip import (
     clip_phrase,
 )
 from video_dataset.vision.heuristic import HeuristicVisionAnalyzer
-from video_dataset.vision.subject_motion import analyze_subject_motion, apply_subject_motion
+from video_dataset.vision.subject_motion import analyze_subject_motion, apply_subject_motion, subject_motion_from_track
+from video_dataset.vision.tracker import primary_track, track_scene
 
 log = get_logger("vision.cv_models")
 
@@ -136,6 +137,9 @@ class CVVisionAnalyzer(VisionAnalyzer):
         analysis.confidence, analysis.confidence_source = self._confidence(objects)
         present = [f for f in chosen if f.frame_path and Path(f.frame_path).exists()]
         subject_motion = analyze_subject_motion(per_frame, [f.timestamp for f in present], context.scan, analysis.camera.movement) if len(present) == len(per_frame) else None
+        tracked = self._track(scene, context, analysis)
+        if tracked is not None:
+            subject_motion = tracked
 
         clip_data: dict[str, Any] = {}
         if self.clip is not None:
@@ -156,6 +160,33 @@ class CVVisionAnalyzer(VisionAnalyzer):
         analysis.summary = " ".join(p for p in parts if p).strip()
         apply_subject_motion(analysis, subject_motion)  # appends the measured subject-motion sentence
         return analysis
+
+    def _track(self, scene: Scene, context: AnalysisContext, analysis: SceneAnalysis):  # type: ignore[no-untyped-def]
+        """Follow subjects through the shot (YOLO + IoU tracker on a low-rate decode). Returns the
+        primary track's subject motion or None; details go to ``enrichments["tracking"]``."""
+        if not getattr(self.cfg, "tracking", False):
+            return None
+        source = context.extra.get("video_path")
+        if not source or not Path(source).exists():
+            return None
+        try:
+            tracks, n_frames = track_scene(
+                Path(source), scene.start_time, scene.end_time, self.detector,
+                fps=float(self.cfg.track_fps), width=int(self.cfg.track_width), max_seconds=float(self.cfg.track_max_seconds),
+                iou_threshold=float(self.cfg.track_iou_threshold), max_age=int(self.cfg.track_max_age), min_hits=int(self.cfg.track_min_hits),
+            )
+        except Exception as exc:
+            log.warning("tracking failed on %s: %s", scene.scene_id, str(exc)[:160])
+            analysis.errors.append(f"tracking_error: {type(exc).__name__}")
+            return None
+        analysis.enrichments["tracking"] = {
+            "frames": n_frames, "fps": float(self.cfg.track_fps), "n_tracks": len(tracks),
+            "tracks": [{"track_id": t.track_id, "name": t.name, "hits": t.hits, "start": t.boxes[0][0], "end": t.boxes[-1][0], "mean_area_fraction": round(t.mean_area_fraction(), 4)} for t in tracks[:20]],
+        }
+        prim = primary_track(tracks)
+        if prim is None:
+            return None
+        return subject_motion_from_track(prim, context.scan, analysis.camera.movement, len(tracks))
 
     def close(self) -> None:
         self.detector.close()

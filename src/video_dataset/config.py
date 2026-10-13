@@ -82,6 +82,10 @@ class SceneDetectionConfig(_Section):
     max_scene_duration: float | None = 60.0
     frame_skip: int = 0
     downscale: int | None = None
+    # A boundary whose content change is spread over several frames (instead of one spike) is a
+    # gradual transition: labelled `dissolve` instead of `cut`.
+    detect_dissolves: bool = True
+    dissolve_min_frames: int = 3  # consecutive frames above dissolve_fraction * threshold around the boundary
 
 
 class FrameSamplingConfig(_Section):
@@ -106,6 +110,17 @@ class FrameSamplingConfig(_Section):
     clip_tolerance_seconds: float = 0.25
     clip_max_height: int = 720  # re-encoded clips are downscaled to this height
     workers: int | None = None  # threads for frame extraction + clip cutting; null -> pipeline.stage_workers
+    # Duplicate frames: two sampled frames of one scene whose perceptual hashes (dHash) differ by at
+    # most this many bits are the same image; the later one is dropped (its file deleted).
+    drop_duplicate_frames: bool = True
+    duplicate_frame_hamming: int = 4
+    # Target-model media preparation: re-encode every clip to a fixed frame rate / size so a training
+    # set is uniform. Off by default (clips keep the source fps and are only capped at clip_max_height).
+    normalize_clips: bool = False
+    target_fps: float | None = None  # e.g. 24
+    target_height: int | None = None  # e.g. 480; with target_width the aspect_mode decides how to fit
+    target_width: int | None = None  # e.g. 854
+    aspect_mode: str = "scale"  # scale (fit inside, keep aspect) | pad (letterbox to exactly WxH) | crop (centre-crop to exactly WxH)
 
 
 class TranscriptionConfig(_Section):
@@ -181,6 +196,15 @@ class VisionConfig(_Section):
     # Scenes analysed concurrently. Measurements always run in parallel; the analyzer itself only when
     # it is thread-safe (heuristic, mock, API providers). Local torch models stay sequential.
     workers: int | None = None  # null -> pipeline.stage_workers
+    # cv_models: follow detected subjects through the shot (YOLO on a low-rate decode of the scene +
+    # IoU tracker) instead of only the handful of sampled frames. Gives per-track direction / path.
+    tracking: bool = True
+    track_fps: float = 3.0  # decode rate for tracking
+    track_width: int = 640  # frames are downscaled to this width before detection
+    track_max_seconds: float = 20.0  # longest span analysed per scene (from its start)
+    track_iou_threshold: float = 0.3  # box overlap needed to continue a track
+    track_max_age: int = 2  # frames a track may go undetected before it ends
+    track_min_hits: int = 3  # detections a track needs before it counts
 
 
 class LLMConfig(_Section):
@@ -252,6 +276,45 @@ class ValidationConfig(_Section):
     grounding_min_overlap: float = 0.3
     max_vlm_verifications_per_video: int = 200
     workers: int | None = None  # threads for verifier calls; null -> pipeline.stage_workers
+    # Cross-field consistency: a scene whose annotations contradict each other (static camera but a
+    # tracked subject, "dark" lighting on a bright frame, caption says pan left but flow says pan
+    # right, ...) is rejected (reject_contradictions) or sent to review.
+    consistency_checks: bool = True
+    reject_contradictions: bool = True
+    # Caption <-> frames alignment with CLIP: the scene's own caption must rank in the top
+    # `clip_alignment_min_rank_fraction` of the video's captions by image-text similarity.
+    # auto: only when a CLIP model is already loaded (cv_models / clip enricher); on: load one; off.
+    # (YAML / --set turn "on" / "off" into booleans; both spellings are accepted.)
+    clip_alignment: str | bool = "auto"
+    clip_alignment_min_rank_fraction: float = 0.5
+    clip_alignment_min_margin: float = 0.02  # ... and the best-matching caption must beat the own one by at least this cosine margin
+    clip_alignment_min_candidates: int = 4  # videos with fewer captioned scenes skip the check
+    clip_alignment_max_frames: int = 3
+    frame_sequence_checks: bool = True  # frames of a scene must be ordered, inside the scene, without large gaps
+    clip_checks: bool = True  # clip files must exist and match the scene span
+
+
+class QualityConfig(_Section):
+    """Visual-quality thresholds. Flags are measured per shot (and per source video) and recorded as
+    `quality_flags`; flagged shots go to review (or are rejected) and never reach gold."""
+
+    min_height: int = 480  # source shorter than this -> low_resolution
+    min_bitrate_kbps: float = 300.0  # source bitrate below this -> heavy compression (0 disables)
+    min_sharpness: float = 30.0  # variance of Laplacian below this -> blurry (0 disables)
+    max_dark_fraction: float = 0.6  # share of near-black pixels above this -> underexposed
+    max_bright_fraction: float = 0.4  # share of near-white pixels above this -> overexposed
+    max_blockiness: float = 0.35  # 8x8 block-boundary ratio above this -> compression artifacts (0 disables)
+    reject_flagged: bool = False  # true: flagged shots are rejected; false: review + tier capped at bronze
+    duration_tolerance_seconds: float = 1.0  # metadata duration vs probed duration mismatch
+
+
+class LicensingConfig(_Section):
+    """Source licensing. yt-dlp reports the YouTube license ("Creative Commons Attribution license
+    (reuse allowed)" or the standard license); it is normalised to `license_status`."""
+
+    allowed: list[str] = Field(default_factory=lambda: ["creative_commons"])  # statuses that count as licensed for reuse
+    action: str = "flag"  # flag: record + subset only | reject: do not download videos outside `allowed`
+    subset: bool = True  # add the "licensed" subset to every record of an allowed video
 
 
 class DeduplicationConfig(_Section):
@@ -262,6 +325,10 @@ class DeduplicationConfig(_Section):
     method: str = "minhash"  # minhash | tfidf
     num_perm: int = 128
     shingle_size: int = 3
+    # Near-duplicate *videos* (re-uploads, re-encodes): perceptual-hash fingerprint of the scan pass;
+    # two videos whose hash sets overlap at least this much are the same content.
+    video_fingerprint: bool = True
+    video_similarity_threshold: float = 0.8
 
 
 class SplitConfig(_Section):
@@ -298,6 +365,19 @@ class CinematicSubsetConfig(_Section):
     write_files: bool = True  # also write final/cinematic/<type>.jsonl (+ dataset.jsonl)
 
 
+class SequenceConfig(_Section):
+    """Longer coherent motion sequences: consecutive shots of one video joined into a `sequence`
+    record (split parts of one long shot always rejoin; cuts join when the setting / subject agree)."""
+
+    enabled: bool = True
+    min_duration: float = 8.0  # sequences shorter than this are not emitted
+    max_duration: float = 120.0
+    max_shots: int = 12
+    require_same_setting: bool = True  # consecutive shots must agree on indoor/outdoor and time of day when both are known
+    require_shared_subject: bool = True  # ... and share at least one detected object class (when both list objects)
+    allow_fades: bool = False  # a fade / dissolve ends a sequence unless true
+
+
 class ExportConfig(_Section):
     formats: list[str] = Field(default_factory=lambda: ["jsonl", "parquet"])
     include_review: bool = True
@@ -315,6 +395,9 @@ class ExportConfig(_Section):
     split: SplitConfig = Field(default_factory=SplitConfig)
     tiers: TierConfig = Field(default_factory=TierConfig)
     cinematic: CinematicSubsetConfig = Field(default_factory=CinematicSubsetConfig)
+    sequences: SequenceConfig = Field(default_factory=SequenceConfig)
+    prompt_variants: int = 3  # template / synonym rewrites of generation_prompt per scene, clip and sequence (0 disables)
+    exclude_duplicate_videos: bool = False  # true: records of near-duplicate videos are left out of final/ (false: kept, bronze, same split as the canonical video)
 
 
 class UploadConfig(_Section):
@@ -388,6 +471,8 @@ class PipelineConfig(BaseModel):
     temporal: TemporalConfig = Field(default_factory=TemporalConfig)
     qa: QAConfig = Field(default_factory=QAConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
+    quality: QualityConfig = Field(default_factory=QualityConfig)
+    licensing: LicensingConfig = Field(default_factory=LicensingConfig)
     deduplication: DeduplicationConfig = Field(default_factory=DeduplicationConfig)
     export: ExportConfig = Field(default_factory=ExportConfig)
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)

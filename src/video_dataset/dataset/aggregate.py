@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from video_dataset.config import PipelineConfig
-from video_dataset.dataset.curation import annotate_records, split_manifest, subset_records
+from video_dataset.dataset.curation import annotate_records, split_manifest, subset_records, video_info_from_manifests
 from video_dataset.dataset.export import (
     CINEMATIC_DIR,
     COMBINED_FILE,
@@ -33,7 +33,7 @@ from video_dataset.dataset.export import (
     write_schema_file,
     write_typed_parquet_files,
 )
-from video_dataset.dataset.stats import compute_statistics
+from video_dataset.dataset.stats import compute_diversity, compute_statistics
 from video_dataset.storage.state_db import StateDB
 from video_dataset.utils.io import read_json, read_jsonl, write_json_atomic
 from video_dataset.utils.logging import get_logger
@@ -144,9 +144,13 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
             log.info("keeping %d record(s) of previously exported videos whose per-video export is gone", kept)
         records = merge_records(existing, records, fresh_ids)
 
-    # one schema for every record, then split / tier / subsets
+    # one schema for every record, then split / tier / subsets (near-duplicate videos share a split)
     records = upgrade_records(records)
-    curation = annotate_records(records, config.export)
+    video_info = video_info_from_manifests(manifests, float(config.deduplication.video_similarity_threshold), bool(config.deduplication.video_fingerprint))
+    curation = annotate_records(records, config.export, video_info, config.licensing, seed=int(config.qa.seed))
+    for m in manifests:  # record the resolved canonical ids so the manifest explains the splits
+        vi = video_info.get(str(m.get("video_id")), {})
+        m["canonical_video_id"] = vi.get("canonical_video_id")
     splits = split_manifest(records)
 
     counts, combined_rows, typed_counts, parquet_rows = _write_dataset_files(records, final_dir, config)
@@ -173,6 +177,8 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
             "combined_jsonl_rows": combined_rows,
             "typed_parquet_counts": typed_counts,
             "cinematic": {**curation, "files": cinematic_counts},
+            "curation": curation,
+            "diversity": compute_diversity(records, manifests),
             "files": {
                 **({name: str(final_dir / f"{name}.jsonl") for name in DATASET_FILES} if config.export.per_type_jsonl else {}),
                 **({f"{name}_parquet": str(final_dir / f"{name}.parquet") for name in DATASET_FILES if typed_counts.get(name)} if config.export.per_type_parquet else {}),

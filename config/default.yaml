@@ -49,6 +49,8 @@ scene_detection:
   max_scene_duration: 60.0 # over-long shots are split for analysis; splits are marked, not treated as cuts
   frame_skip: 0
   downscale: null          # null = automatic
+  detect_dissolves: true   # a boundary whose content change spans several frames is a dissolve, not a cut
+  dissolve_min_frames: 3
 
 frame_sampling:
   min_frames_per_scene: 3
@@ -69,6 +71,13 @@ frame_sampling:
   clip_tolerance_seconds: 0.25  # a clip whose real length differs from the scene by more than this is re-cut (auto) or flagged (copy)
   clip_max_height: 720     # re-encoded clips are downscaled to this height
   workers: null            # threads for frame extraction + clip cutting; null -> pipeline.stage_workers
+  drop_duplicate_frames: true   # sampled frames whose perceptual hash matches an earlier frame of the scene are dropped
+  duplicate_frame_hamming: 4    # dHash bits that may differ for two frames to count as the same image
+  normalize_clips: false   # true: every clip is re-encoded to target_fps / target size (uniform training media, slower)
+  target_fps: null         # e.g. 24
+  target_height: null      # e.g. 480
+  target_width: null       # e.g. 854 (with target_height; aspect_mode decides how the source is fitted)
+  aspect_mode: scale       # scale (fit inside, keep aspect) | pad (letterbox to WxH) | crop (centre-crop to WxH)
 
 transcription:
   enabled: true
@@ -134,6 +143,13 @@ vision:
   torch_dtype: auto
   verify_with_model: true
   workers: null            # scenes analysed concurrently (measurements always; the model only when thread-safe)
+  tracking: true           # cv_models: YOLO + IoU tracker on a low-rate decode of each shot -> subject path / direction
+  track_fps: 3.0
+  track_width: 640
+  track_max_seconds: 20.0  # longest span tracked per shot
+  track_iou_threshold: 0.3
+  track_max_age: 2         # undetected frames before a track ends
+  track_min_hits: 3        # detections a track needs to count
 
 llm:
   provider: none           # none | anthropic | openai_compatible | mock  (text-only helper model)
@@ -198,6 +214,30 @@ validation:
   grounding_min_overlap: 0.3
   max_vlm_verifications_per_video: 200
   workers: null            # threads for verifier calls; null -> pipeline.stage_workers
+  consistency_checks: true # contradictory annotations (static camera + tracked subject, dark label on a bright frame, ...)
+  reject_contradictions: true  # true: such shots are rejected; false: sent to review
+  clip_alignment: auto     # auto (when CLIP is already loaded) | on | off - caption vs frames retrieval check
+  clip_alignment_min_rank_fraction: 0.5  # the shot's own caption must rank in the top half of the video's captions ...
+  clip_alignment_min_margin: 0.02        # ... unless the best caption beats it by less than this cosine margin (noise)
+  clip_alignment_min_candidates: 4
+  clip_alignment_max_frames: 3
+  frame_sequence_checks: true  # frames ordered, inside the shot, no large gaps
+  clip_checks: true        # clip files exist and match the shot span
+
+quality:                   # visual-quality flags (measured); flagged shots -> review (or rejected), never gold
+  min_height: 480          # source height below this -> low_resolution
+  min_bitrate_kbps: 300    # source bitrate below this -> low_bitrate (0 disables)
+  min_sharpness: 30.0      # variance of Laplacian below this -> blurry (0 disables)
+  max_dark_fraction: 0.6   # share of near-black pixels above this -> underexposed
+  max_bright_fraction: 0.4 # share of near-white pixels above this -> overexposed
+  max_blockiness: 0.35     # 8x8 block-boundary ratio above this -> compression_artifacts (0 disables)
+  reject_flagged: false    # true: reject flagged shots instead of review
+  duration_tolerance_seconds: 1.0  # yt-dlp duration vs probed duration mismatch -> duration_mismatch flag
+
+licensing:
+  allowed: [creative_commons]  # license_status values that count as licensed for reuse
+  action: flag             # flag: record license_status + "licensed" subset | reject: skip downloading other videos
+  subset: true
 
 deduplication:
   enabled: true
@@ -207,6 +247,8 @@ deduplication:
   method: minhash          # minhash | tfidf
   num_perm: 128
   shingle_size: 3
+  video_fingerprint: true  # perceptual-hash fingerprint of every video -> near-duplicate videos share one canonical id and split
+  video_similarity_threshold: 0.8
 
 export:
   formats: [jsonl, parquet]
@@ -240,6 +282,16 @@ export:
     require_known_camera: true
     min_sharpness: 50.0
     write_files: true
+  sequences:               # longer coherent motion sequences joined from consecutive shots -> sequences.jsonl
+    enabled: true
+    min_duration: 8.0
+    max_duration: 120.0
+    max_shots: 12
+    require_same_setting: true
+    require_shared_subject: true
+    allow_fades: false
+  prompt_variants: 3       # template + synonym rewrites of each generation_prompt (0 disables)
+  exclude_duplicate_videos: false  # true: drop records of near-duplicate videos from final/
 
 upload:
   provider: huggingface    # none | huggingface - upload final/ automatically once it reaches threshold_mb

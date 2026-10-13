@@ -11,8 +11,12 @@ class TransitionType(StrEnum):
     START = "start"  # first scene of the video
     CUT = "cut"  # hard cut detected by content change
     FADE = "fade"  # fade in/out detected by luminance threshold
+    DISSOLVE = "dissolve"  # gradual transition: the content change is spread over several frames
     ADAPTIVE = "adaptive"  # adaptive detector (rolling-average) cut
     SPLIT = "split"  # artificial split of an over-long shot (not a real boundary)
+
+
+REAL_TRANSITIONS = (TransitionType.CUT, TransitionType.FADE, TransitionType.DISSOLVE, TransitionType.ADAPTIVE)
 
 
 class Scene(TimeSpan):
@@ -52,6 +56,8 @@ class Frame(BaseSchema):
     sampling_reason: SamplingReason = SamplingReason.UNIFORM
     change_score: float | None = None  # visual change vs previous analysed frame (0..1)
     motion_score: float | None = None  # mean optical-flow magnitude (px/frame at analysis res)
+    dhash: str | None = None  # 64-bit perceptual hash (hex) of the written image
+    duplicate_of: str | None = None  # frame_id of an earlier frame with (nearly) the same hash
 
 
 class ScanSample(BaseSchema):
@@ -65,6 +71,7 @@ class ScanSample(BaseSchema):
     flow_dy: float | None = None
     flow_mag: float | None = None  # mean flow magnitude
     flow_div: float | None = None  # divergence proxy: >0 expanding (zoom in / forward), <0 contracting
+    dhash: str | None = None  # perceptual hash of the analysed frame (video fingerprint input)
 
 
 class SceneScan(BaseSchema):
@@ -83,6 +90,10 @@ class Clip(TimeSpan):
     media_duration: float | None = None  # measured length of the file (stream copy cuts at keyframes)
     exact: bool = True  # media_duration matches end_time - start_time within clip_tolerance_seconds
     codec: str | None = None  # "copy" | "libx264": how this file was produced
+    fps: float | None = None  # measured on the written file
+    width: int | None = None
+    height: int | None = None
+    normalized: bool = False  # re-encoded to frame_sampling.target_fps / target size
 
 
 class SceneDetectionResult(BaseSchema):
@@ -98,3 +109,7 @@ class FrameSamplingResult(BaseSchema):
     frames: list[Frame]
     scans: list[SceneScan] = Field(default_factory=list)
     clips: list[Clip] = Field(default_factory=list)
+    fingerprint: list[str] = Field(default_factory=list)  # distinct scan-frame hashes: the video's perceptual fingerprint
+    duplicate_frames_removed: int = 0
+    near_duplicate_of: str | None = None  # video_id with a matching fingerprint already in the state DB
+    near_duplicate_similarity: float | None = None

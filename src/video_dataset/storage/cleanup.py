@@ -167,6 +167,25 @@ def plan_orphans(paths: DataPaths, db: StateDB) -> CleanupPlan:
     return plan
 
 
+def plan_reset(paths: DataPaths, db_path: Path, include_final: bool = False, include_input: bool = False) -> CleanupPlan:
+    """Everything the pipeline produced: every working directory, the logs, the state database (with
+    its WAL / SHM side files) and the run lock. `input/` and `final/` stay unless asked for. This is
+    the production reset before a full re-run."""
+    plan = CleanupPlan()
+    skip = {"input"} if not include_input else set()
+    if not include_final:
+        skip.add("final")
+    for sub in DataPaths.SUBDIRS:
+        if sub in skip:
+            continue
+        plan.add(paths.root / sub)
+    for extra in ("reannotate", "run.lock"):
+        plan.add(paths.root / extra)
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        plan.add(Path(str(db_path) + suffix))
+    return plan
+
+
 def plan_logs(paths: DataPaths) -> CleanupPlan:
     plan = CleanupPlan()
     if paths.logs_dir.exists():

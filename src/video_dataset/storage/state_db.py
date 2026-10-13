@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS file_hashes (
     sha256   TEXT PRIMARY KEY,
     video_id TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS fingerprints (
+    video_id TEXT PRIMARY KEY,
+    hashes   TEXT NOT NULL,
+    n        INTEGER NOT NULL
+);
 """
 
 
@@ -172,6 +178,7 @@ class StateDB:
             self._conn.execute("DELETE FROM videos WHERE video_id = ?", (video_id,))
             self._conn.execute("DELETE FROM stage_log WHERE video_id = ?", (video_id,))
             self._conn.execute("DELETE FROM file_hashes WHERE video_id = ?", (video_id,))
+            self._conn.execute("DELETE FROM fingerprints WHERE video_id = ?", (video_id,))
             self._conn.commit()
 
     # ------------------------------------------------------------------ stages
@@ -334,6 +341,18 @@ class StateDB:
             )
             self._conn.commit()
         return None
+
+    def register_fingerprint(self, video_id: str, hashes: list[str]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO fingerprints (video_id, hashes, n) VALUES (?, ?, ?)", (video_id, json.dumps(sorted(set(hashes))), len(set(hashes)))
+            )
+            self._conn.commit()
+
+    def fingerprints(self, exclude: str | None = None) -> dict[str, list[str]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT video_id, hashes FROM fingerprints").fetchall()
+        return {r["video_id"]: json.loads(r["hashes"]) for r in rows if r["video_id"] != exclude}
 
     def close(self) -> None:
         with self._lock:

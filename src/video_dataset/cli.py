@@ -498,7 +498,7 @@ def reannotate(
     work_dir: Annotated[str | None, typer.Option("--work-dir", help="Where downloaded shards are stored (default data/reannotate)")] = None,
     output: Annotated[str | None, typer.Option("--output", "-o", help="Write the rewritten shard(s) here instead of in place (one sub-folder per shard)")] = None,
     push: Annotated[bool, typer.Option("--push", help="Upload each rewritten shard back to the Hub in place (needs a write token)")] = False,
-    update_card: Annotated[bool, typer.Option("--update-card", help="Also overwrite README.md on the Hub with the current dataset card")] = False,
+    update_card: Annotated[bool, typer.Option("--update-card", help="Also refresh the loader configs (per-type Parquet) in README.md on the Hub; the rest of the card is kept")] = False,
     no_negatives: Annotated[bool, typer.Option("--no-negatives", help="Skip rebuilding hard negatives")] = False,
     config: ConfigOpt = None,
     set_: SetOpt = None,
@@ -567,7 +567,7 @@ def reannotate(
         if not token:
             console.print("[red]--update-card needs a write token[/red]")
             raise typer.Exit(1)
-        console.print(f"dataset card updated: {update_dataset_card(cfg, token)}")
+        console.print(f"dataset card updated: {update_dataset_card(cfg, token) or 'already current'}")
 
 
 @app.command()
@@ -601,6 +601,79 @@ def stats(config: ConfigOpt = None, set_: SetOpt = None) -> None:
         raise typer.Exit(1)
     console.print(format_statistics(s))
     console.print(f"\nfull statistics: {cfg.export_dir / 'statistics.json'}")
+
+
+@app.command()
+def diversity(
+    final_dir: Annotated[str | None, typer.Option("--final-dir", help="Dataset directory to analyse (default: data/final)")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the diversity block as JSON")] = False,
+    config: ConfigOpt = None,
+    set_: SetOpt = None,
+) -> None:
+    """Distribution of camera, subject, environment, lighting, colour, motion, duration and quality
+    attributes across the exported scenes, with the under-represented categories (what to collect next)."""
+    from video_dataset.dataset.reannotate import load_shard
+    from video_dataset.dataset.stats import compute_diversity, format_diversity
+
+    _apply_local_options(config, set_)
+    cfg = _config()
+    final = Path(final_dir) if final_dir else cfg.export_dir
+    stats_file = final / "statistics.json"
+    div = None
+    if stats_file.exists() and not final_dir:
+        try:
+            div = json.loads(stats_file.read_text()).get("diversity")
+        except (ValueError, AttributeError):
+            div = None
+    if div is None:
+        try:
+            records, manifests = load_shard(final)
+        except FileNotFoundError:
+            console.print(f"no exported dataset under {final}; run `video-dataset export` first")
+            raise typer.Exit(1) from None
+        div = compute_diversity(records, manifests)
+    console.print(json.dumps(div, indent=2) if as_json else format_diversity(div))
+    out = final / "diversity.json"
+    try:
+        from video_dataset.utils.io import write_json_atomic
+
+        write_json_atomic(out, div)
+        console.print(f"\nwritten: {out}")
+    except OSError as exc:
+        console.print(f"[yellow]could not write {out}: {exc}[/yellow]")
+
+
+@app.command("verify-media")
+def verify_media_cmd(
+    final_dir: Annotated[str | None, typer.Option("--final-dir", help="Dataset directory to check (default: data/final)")] = None,
+    no_probe: Annotated[bool, typer.Option("--no-probe", help="Only check that clip files exist (skip ffprobe)")] = False,
+    frames_per_video: Annotated[int, typer.Option("--frames-per-video", help="Frames decoded per video (0 = existence only, -1 = all)")] = 20,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the full report as JSON")] = False,
+    config: ConfigOpt = None,
+    set_: SetOpt = None,
+) -> None:
+    """Verify that every clip / frame the exported records reference exists and decodes (writes final/media_report.json).
+    Exit code 1 when anything is missing, unreadable or has the wrong length."""
+    from video_dataset.dataset.verify_media import verify_media
+
+    _apply_local_options(config, set_)
+    cfg = _config()
+    report = verify_media(cfg, Path(final_dir) if final_dir else None, probe_clips=not no_probe, frames_per_video=None if frames_per_video < 0 else frames_per_video)
+    if as_json:
+        console.print(json.dumps(report, indent=2))
+    else:
+        c, f = report["clips"], report["frames"]
+        t = Table(title=f"media check of {report['final_dir']}")
+        for col in ("kind", "total", "ok", "missing", "unreadable", "length mismatch"):
+            t.add_column(col, justify="right" if col != "kind" else "left")
+        t.add_row("clips", str(c["total"]), str(c["ok"]), str(c["missing"]), str(c["unreadable"]), str(c["length_mismatch"]))
+        t.add_row("frames", f"{f['total']} ({f['checked']} decoded)", str(f["ok"]), str(f["missing"]), str(f["unreadable"]), "-")
+        console.print(t)
+        if report["videos_with_problems"]:
+            console.print(f"videos with problems: {report['videos_with_problems']} (first: {', '.join(list(report['per_video'])[:5])})")
+        console.print(f"report: {Path(report['final_dir']) / 'media_report.json'}")
+    if not report["ok"]:
+        raise typer.Exit(1)
 
 
 @app.command("show-config")
@@ -666,6 +739,8 @@ def clean(
     orphans: Annotated[bool, typer.Option("--orphans", help="Delete artifacts of video ids no longer in the state DB")] = False,
     failed: Annotated[bool, typer.Option("--failed", help="Delete artifacts of videos whose DOWNLOAD/PREPROCESS failed")] = False,
     logs: Annotated[bool, typer.Option("--logs", help="Delete data/logs/*.log")] = False,
+    reset: Annotated[bool, typer.Option("--reset", help="Production reset: delete every working directory, the logs, the state DB and the run lock (keeps input/ and final/)")] = False,
+    include_final: Annotated[bool, typer.Option("--include-final", help="With --reset: also delete final/ (the exported dataset and upload state)")] = False,
     report: Annotated[bool, typer.Option("--report", help="Only print disk usage per data sub-directory")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", "-n", help="Show what would be deleted, delete nothing")] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask for confirmation")] = False,
@@ -676,6 +751,28 @@ def clean(
     from video_dataset.storage import cleanup as cl
 
     _apply_local_options(config, set_)
+    cfg = _config()
+    if reset:
+        from video_dataset.storage.paths import DataPaths
+
+        paths = DataPaths(cfg.data_dir)
+        plan = cl.plan_reset(paths, cfg.db_path, include_final=include_final)
+        if not plan.paths:
+            console.print("nothing to reset")
+            return
+        console.print(f"[bold]production reset[/bold] of {paths.root}: delete {len(plan.paths)} path(s), {plan.bytes / 1e9:.2f} GB" + (" (including final/)" if include_final else " (input/ and final/ are kept)"))
+        for p in plan.paths:
+            console.print(f"  {p}")
+        if dry_run:
+            console.print("[cyan]dry run: nothing deleted[/cyan]")
+            return
+        if not yes and not typer.confirm("Proceed? This forgets every checkpoint.", default=False):
+            console.print("aborted")
+            raise typer.Exit(1)
+        removed, freed = cl.apply_plan(plan)
+        paths.ensure_all()
+        console.print(f"removed {removed} path(s), freed {freed / 1e9:.2f} GB; empty data layout recreated")
+        return
     runner = _runner(recover=False)
     try:
         paths = runner.paths

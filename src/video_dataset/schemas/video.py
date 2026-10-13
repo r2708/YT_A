@@ -30,10 +30,24 @@ class VideoMetadata(BaseSchema):
     height: int | None = None
     fps: float | None = None
     format: str | None = None
-    license: str | None = None
+    license: str | None = None  # as reported by the source, e.g. "Creative Commons Attribution license (reuse allowed)"
+    license_status: str | None = None  # creative_commons | standard | unknown (normalised from `license`)
     categories: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     language: str | None = None
+
+
+def license_status(license_text: str | None, source_type: str | SourceType | None = None) -> str:
+    """Normalise a source license string. YouTube offers exactly two: the standard YouTube license
+    (reported as None / "Standard YouTube License") and Creative Commons Attribution."""
+    text = (license_text or "").strip().lower()
+    if "creative commons" in text or text.startswith("cc-by") or text.startswith("cc by"):
+        return "creative_commons"
+    if "standard" in text:
+        return "standard"
+    if text:
+        return "other"
+    return "standard" if str(source_type or "") == "youtube" else "unknown"
 
 
 class AudioStreamInfo(BaseSchema):
@@ -58,6 +72,9 @@ class MediaInfo(BaseSchema):
     has_audio: bool = False
     audio: AudioStreamInfo | None = None
     size_bytes: int | None = None
+    metadata_duration: float | None = None  # duration the source reported (yt-dlp) before download
+    duration_mismatch_seconds: float | None = None  # |probed - metadata| when both are known
+    quality_flags: list[str] = Field(default_factory=list)  # low_resolution | low_bitrate | duration_mismatch
 
 
 class DownloadStatus(StrEnum):

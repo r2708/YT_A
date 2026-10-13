@@ -21,6 +21,7 @@ from video_dataset.config import FrameSamplingConfig
 from video_dataset.schemas.scene import ScanSample, Scene, SceneScan
 from video_dataset.schemas.video import MediaInfo
 from video_dataset.utils.ffmpeg import find_ffmpeg
+from video_dataset.utils.imagehash import dhash
 from video_dataset.utils.logging import get_logger
 
 log = get_logger("frame_sampling.scan")
@@ -125,6 +126,7 @@ def scan_video(
                     flow_dy=dy,
                     flow_mag=mag,
                     flow_div=div,
+                    dhash=dhash(gray),
                 )
             )
             prev_gray, prev_hist, prev_scene = gray, hist, scene.scene_id

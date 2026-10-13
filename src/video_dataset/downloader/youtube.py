@@ -7,9 +7,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from video_dataset.config import DownloadConfig, LimitsConfig
+from video_dataset.config import DownloadConfig, LicensingConfig, LimitsConfig
 from video_dataset.downloader.base import FetchResult, VideoRejectedError, VideoUnavailableError
-from video_dataset.schemas.video import DownloadStatus, SourceType, VideoMetadata
+from video_dataset.schemas.video import DownloadStatus, SourceType, VideoMetadata, license_status
 from video_dataset.utils.disk import free_bytes
 from video_dataset.utils.ffmpeg import find_ffmpeg
 from video_dataset.utils.logging import get_logger
@@ -217,16 +217,31 @@ def _parse_rate_limit(value: str | None) -> int | None:
 class YouTubeDownloader:
     name = "yt_dlp"
 
-    def __init__(self, config: DownloadConfig, ffmpeg_path: str | None = None, limits: LimitsConfig | None = None):
+    def __init__(self, config: DownloadConfig, ffmpeg_path: str | None = None, limits: LimitsConfig | None = None, licensing: LicensingConfig | None = None):
         self.config = config
         self.ffmpeg_path = ffmpeg_path
         self.limits = limits or LimitsConfig()
+        self.licensing = licensing or LicensingConfig()
 
     # -------------------------------------------------------------- limits
+    def check_license(self, info: dict[str, Any]) -> str | None:
+        """With ``licensing.action: reject``: the reason a video outside ``licensing.allowed`` must not
+        be downloaded (decided on yt-dlp's metadata, before any media bytes), else None."""
+        if (self.licensing.action or "flag").lower() != "reject":
+            return None
+        status = license_status(info.get("license"), SourceType.YOUTUBE)
+        allowed = [str(a).lower() for a in (self.licensing.allowed or [])]
+        if status not in allowed:
+            return f"license '{info.get('license') or 'standard'}' ({status}) is not in licensing.allowed {allowed}"
+        return None
+
     def check_limits(self, info: dict[str, Any], dest_dir: Path | None = None) -> str | None:
-        """Reason the video must not be downloaded (duration / size / disk), or None. Uses yt-dlp's
-        metadata so the decision is made before any media bytes are transferred."""
+        """Reason the video must not be downloaded (duration / size / disk / license), or None. Uses
+        yt-dlp's metadata so the decision is made before any media bytes are transferred."""
         lim = self.limits
+        licence_problem = self.check_license(info)
+        if licence_problem:
+            return licence_problem
         duration = info.get("duration")
         if lim.max_duration_seconds and duration and float(duration) > float(lim.max_duration_seconds):
             return f"duration {float(duration) / 60:.1f} min exceeds limits.max_duration_seconds ({float(lim.max_duration_seconds) / 60:.0f} min)"
@@ -368,6 +383,7 @@ class YouTubeDownloader:
             fps=float(fps) if fps else None,
             format=(path.suffix.lstrip(".") if path else info.get("ext")),
             license=info.get("license"),
+            license_status=license_status(info.get("license"), SourceType.YOUTUBE),
             categories=list(info.get("categories") or []),
             tags=list(info.get("tags") or [])[:30],
             language=info.get("language"),

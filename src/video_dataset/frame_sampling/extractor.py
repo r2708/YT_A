@@ -11,6 +11,7 @@ from video_dataset.frame_sampling.sampler import Candidate
 from video_dataset.schemas.scene import Frame, Scene
 from video_dataset.utils.ffmpeg import run_ffmpeg
 from video_dataset.utils.ids import frame_id as make_frame_id
+from video_dataset.utils.imagehash import dhash
 from video_dataset.utils.logging import get_logger
 from video_dataset.utils.parallel import chunk_evenly, parallel_map
 from video_dataset.utils.progress import ProgressLog
@@ -102,6 +103,7 @@ class FrameExtractor:
                         sampling_reason=cand.reason,
                         change_score=cand.change,
                         motion_score=cand.motion,
+                        dhash=dhash(img),
                     )
                 )
         finally:

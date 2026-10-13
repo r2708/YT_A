@@ -17,9 +17,13 @@ _ENUM_SETTING = ["indoor", "outdoor", "mixed", "unknown"]
 _ENUM_SHOT = ["extreme_wide", "wide", "medium", "close_up", "extreme_close_up", "unknown"]
 _ENUM_ANGLE = ["eye_level", "low", "high", "overhead", "aerial", "dutch", "unknown"]
 _ENUM_MOVEMENT = [
-    "static", "pan_left", "pan_right", "tilt_up", "tilt_down", "zoom_in", "zoom_out", "tracking",
-    "tracking_forward", "tracking_backward", "handheld", "complex", "unknown",
+    "static", "pan_left", "pan_right", "tilt_up", "tilt_down", "dolly_in", "dolly_out", "zoom_in", "zoom_out",
+    "tracking", "tracking_left", "tracking_right", "tracking_forward", "tracking_backward",
+    "orbit", "orbit_clockwise", "orbit_counterclockwise", "crane", "crane_up", "crane_down",
+    "handheld", "fpv", "drone", "complex", "unknown",
 ]
+_ENUM_LENS = ["wide_angle", "normal", "portrait", "telephoto", "anamorphic", "fisheye", "macro"]
+_ENUM_DOF = ["shallow", "medium", "deep"]
 
 
 def _str_or_null() -> dict[str, Any]:
@@ -79,8 +83,15 @@ SCENE_SCHEMA: dict[str, Any] = {
                 "zoom": _str_or_null(),
                 "stability": _str_or_null(),
                 "is_aerial": {"type": ["boolean", "null"]},
+                # optics: estimates, null unless the frames make them clear
+                "lens_type": {"type": ["string", "null"], "enum": [*_ENUM_LENS, None]},
+                "focal_length_mm": {"type": ["number", "null"], "description": "Full-frame-equivalent focal length estimate (24, 35, 50, 85, 135 ...)."},
+                "depth_of_field": {"type": ["string", "null"], "enum": [*_ENUM_DOF, None]},
+                "focus_type": _str_or_null(),
+                "camera_height": _str_or_null(),
+                "perspective": _str_or_null(),
             },
-            "required": ["shot_type", "camera_angle", "movement", "zoom", "stability", "is_aerial"],
+            "required": ["shot_type", "camera_angle", "movement", "zoom", "stability", "is_aerial", "lens_type", "focal_length_mm", "depth_of_field", "focus_type", "camera_height", "perspective"],
             "additionalProperties": False,
         },
         "visual_style": {
@@ -145,6 +156,10 @@ def scene_prompt(
         "Describe the shot as a structured JSON annotation with these fields: summary, environment, objects, people, actions, camera, visual_style, temporal_progression, confidence.",
         "For temporal_progression, say what changes between the first and last frame (movement, entrances/exits, state changes). Say null if nothing changes.",
         "Describe people only by count, clothing, posture and visible actions.",
+        "camera.movement uses one label: static, pan_left/right, tilt_up/down, dolly_in/out (camera body moves), zoom_in/out (lens), "
+        "tracking(_left/_right/_forward/_backward), orbit(_clockwise/_counterclockwise), crane(_up/_down), handheld, fpv, drone, complex.",
+        "lens_type, focal_length_mm, depth_of_field and focus_type are estimates: fill them only when the frames make them evident "
+        "(strong background blur -> shallow; barrel distortion -> wide_angle; compressed background -> telephoto), otherwise null.",
     ]
     if measured_camera:
         parts.append(f"Optical-flow measurement suggests the camera motion is '{measured_camera}'. Use it only if the frames agree.")

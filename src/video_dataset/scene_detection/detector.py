@@ -98,6 +98,8 @@ class PySceneDetector:
                     transition = TransitionType.FADE
                 elif cfg.detector == "adaptive":
                     transition = TransitionType.ADAPTIVE
+                if transition == TransitionType.CUT and getattr(cfg, "detect_dissolves", True) and self._is_gradual(stats, s, fps, cfg.threshold, int(getattr(cfg, "dissolve_min_frames", 3) or 3)):
+                    transition = TransitionType.DISSOLVE
             scenes.append(
                 Scene(
                     scene_id=make_scene_id(idx),
@@ -118,6 +120,23 @@ class PySceneDetector:
         scenes = enforce_min_scene_length(scenes, cfg.min_scene_len_seconds)
         scenes = split_long_scenes(scenes, cfg.max_scene_duration, fps, video_id)
         return SceneDetectionResult(video_id=video_id, detector=self.name, threshold=cfg.threshold, duration=info.duration, scenes=scenes)
+
+    @classmethod
+    def _is_gradual(cls, stats, frame: int, fps: float, threshold: float, min_frames: int) -> bool:  # type: ignore[no-untyped-def]
+        """A hard cut is one frame with a large content change surrounded by frames with almost none.
+        A dissolve / wipe spreads the change over several consecutive frames: at least ``min_frames``
+        frames around the boundary each carry a sizeable share (>= 35%) of the detector threshold."""
+        half = max(2, int(round(fps * 0.5)))
+        level = 0.35 * float(threshold)
+        run = best = 0
+        for f in range(max(0, frame - half), frame + half + 1):
+            v = cls._content_val(stats, f)
+            if v is not None and v >= level:
+                run += 1
+                best = max(best, run)
+            else:
+                run = 0
+        return best >= max(2, min_frames)
 
     @staticmethod
     def _content_val(stats, frame: int) -> float | None:  # type: ignore[no-untyped-def]

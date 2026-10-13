@@ -295,10 +295,13 @@ video-dataset reannotate [SHARD_DIR...] [--from-hub] [--only shard_0001,...] [-o
 video-dataset package [-o bundle.zip] [--include-media]
 video-dataset upload [--force] [--dry-run] [--status]
 video-dataset stats
+video-dataset diversity [--final-dir DIR] [--json]
+video-dataset verify-media [--final-dir DIR] [--no-probe] [--frames-per-video N] [--json]
 video-dataset stages
 video-dataset show-config
 video-dataset doctor
 video-dataset clean [VIDEO_ID ...] [--files] [--intermediate] [--orphans] [--failed] [--logs] [--report] [--dry-run] [--yes]
+video-dataset clean --reset [--include-final] [--dry-run] [--yes]
 ```
 
 Global options (before the command): `--config FILE`, `--set key.path=value` (repeatable),
@@ -539,6 +542,36 @@ token. Aesthetic score, subject motion and camera speed need the frames and stay
 * `measurements.aesthetic_score` - the LAION aesthetic predictor (a linear head on the CLIP
   embedding already computed for the zero-shot attributes; ~1 poor .. 10 excellent). Enabled by
   `vision.aesthetic`, weights downloaded once to `~/.cache/video_dataset/aesthetic/`.
+* **subject tracking** (`vision.tracking`, default on): every shot is decoded at `track_fps` (3 fps,
+  up to `track_max_seconds`), YOLO runs on those frames and an IoU tracker (Hungarian assignment,
+  SciPy) links the boxes into tracks. The longest / largest track is the primary subject;
+  `subject_motion` then carries `method: tracker`, `track_id`, `n_tracks`, `direction` and a thinned
+  `trajectory` of `[t, cx, cy, area_fraction]` points. Without a track the sampled-frame method
+  (`method: sampled_frames`) is kept. Track summaries sit in `enrichments.tracking`.
+
+### Quality, consistency and duplicate checks
+
+Everything below is measured with the installed tools (OpenCV, PySceneDetect, YOLO, CLIP, ffprobe);
+no language model is involved. Thresholds live in `config/default.yaml` (`quality:`, `validation:`,
+`deduplication:`, `licensing:`, `frame_sampling:`, `export:`).
+
+| Check | Where it runs | What it records |
+|---|---|---|
+| Duration validation | PREPROCESS | `media_info.duration_mismatch_seconds` (probed vs the duration yt-dlp reported) -> `duration_mismatch` flag; VALIDATION re-checks every clip file against its scene span (`checks.clip_duration_exact`) |
+| Availability / corruption | PREPROCESS, VALIDATION, `verify-media` | zero-length or undecodable sources fail PREPROCESS; missing / unreadable clip and frame files reject the shot (`validation.reject_on_missing_files`); `video-dataset verify-media` re-probes every exported path and writes `final/media_report.json` |
+| Scene transitions | SCENE_DETECTION | `transition_in`: `cut`, `fade` (luminance), `dissolve` (content change spread over >= `dissolve_min_frames` frames), `split` (artificial); transition events carry the type |
+| Duplicate frames | FRAME_EXTRACTION | every frame gets a 64-bit `dhash`; frames repeating an earlier frame of the shot within `duplicate_frame_hamming` bits are dropped (`drop_duplicate_frames`) |
+| Duplicate videos | FRAME_EXTRACTION, EXPORT | the scan pass yields a perceptual `fingerprint` (distinct dHashes); a video whose fingerprint overlaps an earlier one by >= `video_similarity_threshold` (Jaccard) is a near-duplicate: `canonical_video_id` on all its records, same split as the canonical video (no leakage), tier capped at bronze, excluded from `cinematic`; `export.exclude_duplicate_videos` drops them entirely |
+| Frame sequence | VALIDATION | frames of a shot must lie inside it, carry increasing frame indices and leave no gap above max(5 s, 3x the mean spacing) (`checks.frame_sequence`) |
+| Visual quality | VISION (measure) + VALIDATION | `measurements.dark_fraction / bright_fraction / exposure / blockiness` on the full-resolution frames; `quality_flags` = `blurry`, `underexposed`, `overexposed`, `compression_artifacts`, `low_resolution`, `low_bitrate`; flagged shots go to review (or are rejected with `quality.reject_flagged`), never above silver, never cinematic |
+| Annotation consistency | VALIDATION | `validation/consistency.py`: camera label vs measured optical flow, static camera vs tracked subject, lighting label vs measured brightness, subject-motion label vs its own velocity, and the caption's own camera words vs the camera field; contradictions reject (`validation.reject_contradictions`) or review |
+| Caption / frame alignment | VALIDATION | with CLIP loaded (`cv_models` or the `clip` enricher; `validation.clip_alignment: auto|on|off`) every caption is scored against the frames of every shot of the video; a caption that ranks in the bottom half **and** is beaten by >= `clip_alignment_min_margin` goes to review (`enrichments.caption_alignment`) |
+| Hard-negative validation | VALIDATION + export | contradictory shots never become positives (above); negatives are still derived only from measured differences |
+| Longer sequences | EXPORT (`sequences.jsonl`) | consecutive shots are joined when the second is a `split` of the first, or a cut whose setting / time of day / detected subjects agree (`export.sequences`); each `sequence` record lists `scene_ids`, `clip_ids`, `coherence`, `camera_movements`, a joined `generation_prompt` and `shot_prompts` |
+| Prompt variants | EXPORT | `prompt_variants` on scene, clip and sequence records: template + synonym rewrites of `generation_prompt` built from the same structured facts (`export.prompt_variants`, deterministic per record) |
+| Media preparation | FRAME_EXTRACTION | `frame_sampling.normalize_clips` with `target_fps` / `target_width` / `target_height` / `aspect_mode` (scale, pad, crop) re-encodes every clip to one format; clip records carry the measured `fps`, `width`, `height` and `normalized` |
+| Licensing | DOWNLOAD + EXPORT | `license_status` (`creative_commons`, `standard`, `other`, `unknown`) from the source license; `licensing.action: reject` refuses to download videos outside `licensing.allowed`; allowed videos' records get the `licensed` subset |
+| Diversity | `video-dataset diversity`, `statistics.json` | distributions of shot size, camera movement (+ direction, speed), angle, setting, time of day, lighting, colour temperature, exposure, subject motion, transitions, duration, aesthetic score, subjects and quality flags, plus the under-represented categories |
 
 ### Scene record (`scenes.jsonl`)
 
@@ -870,6 +903,7 @@ look, `--yes` to skip the prompt):
 | `clean --logs` | `data/logs/*.log` | logs are append-only and grow with every run |
 | `clean VIDEO_ID` | the video's checkpoint state only (files stay; it is re-processed from scratch next run) | reset one video |
 | `clean VIDEO_ID --files` | state **and** every artifact of that video | remove a video completely (re-export afterwards: `video-dataset export`) |
+| `clean --reset` | every working directory, the logs, `state.db` (+ WAL/SHM) and `run.lock`; keeps `input/` and `final/` (add `--include-final` to drop the exported dataset too) | production reset before a full re-run of every video; the empty data layout is recreated |
 
 What each option keeps and why:
 

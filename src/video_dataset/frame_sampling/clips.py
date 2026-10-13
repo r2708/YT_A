@@ -46,8 +46,9 @@ class ClipStats:
         }
 
 
-def media_duration(path: Path, ffprobe_path: str | None = None) -> float | None:
-    """Length of a media file in seconds (ffprobe, OpenCV fallback)."""
+def probe_clip(path: Path, ffprobe_path: str | None = None) -> dict[str, float | int | None]:
+    """duration / fps / width / height of a media file (ffprobe, OpenCV fallback); None when unknown."""
+    out: dict[str, float | int | None] = {"duration": None, "fps": None, "width": None, "height": None}
     try:
         info = ffprobe_json(path, ffprobe_path)
     except Exception as exc:
@@ -56,10 +57,18 @@ def media_duration(path: Path, ffprobe_path: str | None = None) -> float | None:
     if info:
         try:
             d = float(info.get("format", {}).get("duration") or 0.0)
-            if d > 0:
-                return d
+            out["duration"] = d if d > 0 else None
         except (TypeError, ValueError):
             pass
+        video = next((s for s in info.get("streams") or [] if s.get("codec_type") == "video"), None)
+        if video:
+            from video_dataset.utils.ffmpeg import parse_rate
+
+            out["fps"] = parse_rate(video.get("avg_frame_rate")) or parse_rate(video.get("r_frame_rate"))
+            out["width"] = int(video.get("width") or 0) or None
+            out["height"] = int(video.get("height") or 0) or None
+        if out["duration"] is not None:
+            return out
     try:
         import cv2
 
@@ -67,21 +76,55 @@ def media_duration(path: Path, ffprobe_path: str | None = None) -> float | None:
         try:
             fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
             n = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+            out["fps"] = out["fps"] or (float(fps) if fps else None)
+            out["width"] = out["width"] or (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None)
+            out["height"] = out["height"] or (int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None)
         finally:
             cap.release()
-        return n / fps if fps and n else None
+        out["duration"] = n / fps if fps and n else out["duration"]
     except Exception as exc:
         log.debug("OpenCV duration probe failed on %s: %s", path.name, exc)
-        return None
+    return out
 
 
-def _cut(video_path: Path, out: Path, start: float, end: float, *, reencode: bool, has_audio: bool, clip_height: int, ffmpeg_path: str | None) -> None:
+def media_duration(path: Path, ffprobe_path: str | None = None) -> float | None:
+    """Length of a media file in seconds (ffprobe, OpenCV fallback)."""
+    d = probe_clip(path, ffprobe_path)["duration"]
+    return float(d) if d is not None else None
+
+
+def video_filter(cfg: FrameSamplingConfig, clip_height: int) -> str:
+    """FFmpeg -vf chain for a re-encoded clip: the height cap, or - with ``normalize_clips`` - the
+    target frame rate and size (``aspect_mode``: scale keeps the aspect inside WxH, pad letterboxes
+    to exactly WxH, crop centre-crops to exactly WxH). Output dimensions are always even."""
+    filters: list[str] = []
+    if cfg.normalize_clips and cfg.target_fps:
+        filters.append(f"fps={float(cfg.target_fps):g}")
+    w, h = cfg.target_width if cfg.normalize_clips else None, cfg.target_height if cfg.normalize_clips else None
+    if w and h:
+        mode = (cfg.aspect_mode or "scale").lower()
+        if mode == "pad":
+            filters.append(f"scale={int(w)}:{int(h)}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={int(w)}:{int(h)}:(ow-iw)/2:(oh-ih)/2")
+        elif mode == "crop":
+            filters.append(f"scale={int(w)}:{int(h)}:force_original_aspect_ratio=increase:force_divisible_by=2,crop={int(w)}:{int(h)}")
+        else:
+            filters.append(f"scale={int(w)}:{int(h)}:force_original_aspect_ratio=decrease:force_divisible_by=2")
+    elif h:
+        filters.append(f"scale=-2:{int(h)}")
+    elif w:
+        filters.append(f"scale={int(w)}:-2")
+    else:
+        filters.append(f"scale=-2:'min(ih,{clip_height})'")
+    return ",".join(filters)
+
+
+def _cut(video_path: Path, out: Path, start: float, end: float, *, reencode: bool, has_audio: bool, clip_height: int, ffmpeg_path: str | None, vf: str | None = None) -> None:
     length = max(0.05, end - start)
     args = ["-ss", f"{start:.3f}", "-i", str(video_path), "-t", f"{length:.3f}"]
     if not reencode:
         args += ["-c", "copy", "-avoid_negative_ts", "make_zero"]
     else:
-        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-vf", f"scale=-2:'min(ih,{clip_height})'"]
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-vf", vf or f"scale=-2:'min(ih,{clip_height})'"]
         args += ["-c:a", "aac", "-b:a", "128k"] if has_audio else ["-an"]
     args += ["-movflags", "+faststart", str(out)]
     run_ffmpeg(args, ffmpeg_path=ffmpeg_path)
@@ -111,7 +154,7 @@ def _plan(scenes: list[Scene], max_len: float) -> list[_ClipTask]:
 
 def _cut_one(
     task: _ClipTask, video_path: Path, video_id: str, frames: list[Frame], out_dir: Path, codec: str, tolerance: float,
-    clip_height: int, has_audio: bool, ffmpeg_path: str | None, ffprobe_path: str | None,
+    clip_height: int, has_audio: bool, ffmpeg_path: str | None, ffprobe_path: str | None, vf: str | None = None, normalized: bool = False,
 ) -> tuple[Clip | None, dict[str, float], str | None]:
     """Cut / measure / re-cut one clip. Returns (clip, stat deltas, error) and never raises."""
     scene, start, end = task.scene, task.start, task.end
@@ -120,30 +163,32 @@ def _cut_one(
     out = out_dir / f"{cid}.mp4"
     delta: dict[str, float] = {"stream_copied": 0, "reencoded": 0, "reused": 0, "error": 0.0}
     produced_by: str | None = None
-    measured: float | None = None
+    probe: dict[str, float | int | None] = {"duration": None, "fps": None, "width": None, "height": None}
     try:
         if out.exists() and out.stat().st_size > 0:
-            measured = media_duration(out, ffprobe_path)
+            probe = probe_clip(out, ffprobe_path)
             delta["reused"] += 1
         elif codec == "libx264":
-            _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
+            _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path, vf=vf)
             produced_by = "libx264"
-            measured = media_duration(out, ffprobe_path)
+            probe = probe_clip(out, ffprobe_path)
             delta["reencoded"] += 1
         else:
             _cut(video_path, out, start, end, reencode=False, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
             produced_by = "copy"
-            measured = media_duration(out, ffprobe_path)
+            probe = probe_clip(out, ffprobe_path)
             delta["stream_copied"] += 1
 
-        error = abs(measured - expected) if measured is not None else 0.0
+        measured = probe["duration"]
+        error = abs(float(measured) - expected) if measured is not None else 0.0
         if error > tolerance and codec == "auto":
             # keyframe-aligned copy missed the boundary: re-cut this clip exactly
             log.debug("clip %s is %.2fs vs scene %.2fs; re-encoding", cid, measured or -1, expected)
-            _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path)
+            _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path, vf=vf)
             produced_by = "libx264"
-            measured = media_duration(out, ffprobe_path)
-            error = abs(measured - expected) if measured is not None else 0.0
+            probe = probe_clip(out, ffprobe_path)
+            measured = probe["duration"]
+            error = abs(float(measured) - expected) if measured is not None else 0.0
             delta["reencoded"] += 1
     except Exception as exc:
         log.warning("clip %s failed: %s", cid, exc)
@@ -158,9 +203,13 @@ def _cut_one(
         end_time=round(end, 3),
         clip_path=str(out),
         frame_ids=[f.frame_id for f in frames if f.scene_id == scene.scene_id and start - 1e-3 <= f.timestamp <= end + 1e-3],
-        media_duration=round(measured, 3) if measured is not None else None,
+        media_duration=round(float(measured), 3) if measured is not None else None,
         exact=error <= tolerance,
         codec=produced_by,
+        fps=round(float(probe["fps"]), 3) if probe.get("fps") else None,
+        width=int(probe["width"]) if probe.get("width") else None,
+        height=int(probe["height"]) if probe.get("height") else None,
+        normalized=bool(normalized and produced_by == "libx264"),
     )
     return clip, delta, None
 
@@ -185,18 +234,23 @@ def extract_clips(
         raise ValueError(f"frame_sampling.clip_codec must be one of {CLIP_CODECS}, got '{cfg.clip_codec}'")
     tolerance = float(cfg.clip_tolerance_seconds or 0.25)
     clip_height = int(cfg.clip_max_height or 720)
+    normalized = bool(cfg.normalize_clips and (cfg.target_fps or cfg.target_height or cfg.target_width))
+    if normalized:
+        codec = "libx264"  # a uniform fps / size needs a re-encode of every clip
+    vf = video_filter(cfg, clip_height)
     max_len = float(cfg.clip_max_duration or 0) or float("inf")
     tasks = _plan(scenes, max_len)
     workers = max(1, min(int(workers or 1), len(tasks) or 1))
     stats = ClipStats(total=len(tasks))
     log.info(
-        "cutting %d clips for %d scenes -> %s (codec=%s, max %.0fs each, %d worker%s)",
+        "cutting %d clips for %d scenes -> %s (codec=%s, max %.0fs each, %d worker%s%s)",
         len(tasks), len(scenes), out_dir, codec, max_len if max_len != float("inf") else 0, workers, "s" if workers != 1 else "",
+        f", normalised: {vf}" if normalized else "",
     )
     progress = ProgressLog(log, "clip extraction", len(tasks), unit="clips", every_seconds=10)
 
     def _run(task: _ClipTask) -> tuple[Clip | None, dict[str, float], str | None]:
-        return _cut_one(task, video_path, video_id, frames, out_dir, codec, tolerance, clip_height, has_audio, ffmpeg_path, ffprobe_path)
+        return _cut_one(task, video_path, video_id, frames, out_dir, codec, tolerance, clip_height, has_audio, ffmpeg_path, ffprobe_path, vf=vf, normalized=normalized)
 
     def _collect(i: int, res: tuple[Clip | None, dict[str, float], str | None]) -> None:
         clip, delta, err = res

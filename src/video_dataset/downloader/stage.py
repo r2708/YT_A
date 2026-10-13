@@ -39,7 +39,7 @@ def download_stage(ctx: VideoContext) -> StageOutput:
             write_json_atomic(ctx.paths.download_record_file(ctx.video_id), record)
             raise DownloadRejected(f"rejected URL: {problem}")
 
-    source = LocalFileSource() if item.kind == "local" else YouTubeDownloader(ctx.config.download, ctx.config.project.ffmpeg_path, ctx.config.limits)
+    source = LocalFileSource() if item.kind == "local" else YouTubeDownloader(ctx.config.download, ctx.config.project.ffmpeg_path, ctx.config.limits, ctx.config.licensing)
     result = source.fetch(item, ctx.video_id, dest_dir)
 
     record = DownloadRecord(

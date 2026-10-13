@@ -70,7 +70,8 @@ class QARecord(BaseSchema):
     split: Split | None = None  # train / validation / test, assigned per source video
     tier: Tier | None = None  # gold / silver / bronze, derived from validation + quality
     tier_reasons: list[str] = Field(default_factory=list)
-    subsets: list[str] = Field(default_factory=list)  # e.g. ["cinematic"]
+    subsets: list[str] = Field(default_factory=list)  # e.g. ["cinematic", "licensed"]
+    canonical_video_id: str | None = None  # set when the source video is a near-duplicate of another video
 
     @model_validator(mode="before")
     @classmethod

@@ -62,11 +62,15 @@ def coerce_enum(value: Any, enum_cls: type[E], default: E) -> E:
         "wide_shot": "wide", "long_shot": "wide", "full_shot": "wide", "medium_shot": "medium", "closeup": "close_up",
         "close": "close_up", "extreme_closeup": "extreme_close_up", "establishing": "extreme_wide", "birds_eye": "overhead",
         "top_down": "overhead", "drone": "aerial", "low_angle": "low", "high_angle": "high", "eye": "eye_level",
-        "pan": "pan_right", "tilt": "tilt_up", "dolly_in": "tracking_forward", "dolly_out": "tracking_backward",
-        "push_in": "zoom_in", "pull_out": "zoom_out", "steady": "static", "still": "static", "fixed": "static",
+        "pan": "pan_right", "tilt": "tilt_up", "push_in": "dolly_in", "pull_out": "dolly_out", "pull_back": "dolly_out",
+        "truck_left": "tracking_left", "truck_right": "tracking_right", "track_left": "tracking_left", "track_right": "tracking_right",
+        "boom_up": "crane_up", "boom_down": "crane_down", "pedestal_up": "crane_up", "pedestal_down": "crane_down", "jib": "crane",
+        "arc": "orbit", "arc_shot": "orbit", "orbit_left": "orbit_counterclockwise", "orbit_right": "orbit_clockwise",
+        "pov": "fpv", "first_person": "fpv", "point_of_view": "fpv", "aerial_drone": "drone", "drone_shot": "drone",
+        "steady": "static", "still": "static", "fixed": "static",
         "inside": "indoor", "outside": "outdoor", "interior": "indoor", "exterior": "outdoor", "shaky": "handheld",
         "indoors": "indoor", "outdoors": "outdoor", "in": "indoor", "out": "outdoor", "both": "mixed",
-        "dolly": "tracking", "truck": "tracking", "follow": "tracking", "orbit": "complex", "crane": "complex",
+        "dolly": "tracking", "truck": "tracking", "follow": "tracking",
     }
     v2 = aliases.get(v)
     if v2:
@@ -140,16 +144,56 @@ def parse_objects(v: Any) -> list[ObjectAnnotation]:
     return out[:40]
 
 
+_LENS_ALIASES = {
+    "wide": "wide_angle", "wide_angle_lens": "wide_angle", "ultra_wide": "wide_angle", "ultrawide": "wide_angle", "fisheye_lens": "fisheye",
+    "standard": "normal", "normal_lens": "normal", "50mm": "normal", "prime": "normal", "tele": "telephoto", "telephoto_lens": "telephoto",
+    "long": "telephoto", "portrait_lens": "portrait", "85mm": "portrait", "anamorphic_lens": "anamorphic", "macro_lens": "macro",
+}
+_LENS_TYPES = {"wide_angle", "normal", "portrait", "telephoto", "anamorphic", "fisheye", "macro"}
+_DOF = {"shallow": "shallow", "deep": "deep", "medium": "medium", "moderate": "medium", "narrow": "shallow", "wide": "deep"}
+
+
+def _lens(v: Any) -> str | None:
+    s = _str(v)
+    if not s:
+        return None
+    key = s.lower().replace(" ", "_").replace("-", "_")
+    key = _LENS_ALIASES.get(key, key)
+    return key if key in _LENS_TYPES else None
+
+
+def _focal(v: Any) -> float | None:
+    """35 / "35mm" / "about 35 mm" -> 35.0; anything else -> None."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if 4 <= float(v) <= 2000 else None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*mm", str(v).lower()) or re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*", str(v))
+    return float(m.group(1)) if m and 4 <= float(m.group(1)) <= 2000 else None
+
+
 def parse_camera(v: Any) -> CameraAnnotation:
     if not isinstance(v, dict):
         v = {}
+    lens_type, focal = _lens(v.get("lens_type")), _focal(v.get("focal_length_mm") or v.get("focal_length"))
+    dof_raw = _str(v.get("depth_of_field"))
+    dof = next((label for word, label in _DOF.items() if dof_raw and word in dof_raw.lower()), None)
     return CameraAnnotation(
-        shot_type=coerce_enum(v.get("shot_type"), ShotType, ShotType.UNKNOWN),
+        shot_type=coerce_enum(v.get("shot_type") or v.get("shot_size"), ShotType, ShotType.UNKNOWN),
         camera_angle=coerce_enum(v.get("camera_angle") or v.get("angle"), CameraAngle, CameraAngle.UNKNOWN),
         movement=coerce_enum(v.get("movement"), CameraMovement, CameraMovement.UNKNOWN),
+        camera_movement=_str(v.get("camera_movement")),  # family (+ direction) when the model answers in taxonomy form
+        movement_direction=_str(v.get("movement_direction")),
         zoom=_str(v.get("zoom")),
-        stability=_str(v.get("stability")),
+        stability=_str(v.get("stability")) or _str(v.get("stabilization")),
         is_aerial=bool(v["is_aerial"]) if isinstance(v.get("is_aerial"), bool) else None,
+        camera_height=_str(v.get("camera_height")),
+        lens_type=lens_type,
+        focal_length_mm=focal,
+        depth_of_field=dof,
+        focus_type=_str(v.get("focus_type")),
+        perspective=_str(v.get("perspective")),
+        lens_confidence_source=ConfidenceSource.MODEL_SELF_REPORT if (lens_type or focal or dof or _str(v.get("focus_type"))) else ConfidenceSource.UNAVAILABLE,
         confidence=None,
         confidence_source=ConfidenceSource.UNAVAILABLE,
     )

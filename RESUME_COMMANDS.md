@@ -97,6 +97,40 @@ video-dataset export --rerun
 video-dataset validate
 ```
 
+## Production Reset and Full Re-run (schema change of 2026-10-13)
+
+The quality / curation release changed the record schema (new columns on every record type, new
+`sequences` type), so every video is re-processed from scratch and every Hub shard is replaced.
+
+### 1. Look at what the reset would delete (keeps input/ and final/)
+```bash
+cd /Users/rajkhajanchi/Desktop/YT_A && source .venv/bin/activate && video-dataset clean --reset --dry-run
+```
+
+### 2. Reset checkpoints, working files, logs and the state database
+```bash
+video-dataset clean --reset --yes                 # keeps data/input and data/final (upload state included)
+video-dataset clean --reset --include-final --yes # also drops data/final: shard numbering restarts at shard_0001
+```
+
+### 3. Re-run every video (cv_models + spaCy, tracking and CLIP alignment are on by default)
+```bash
+video-dataset run data/input/sample_urls.txt --workers 12 --set vision.provider=cv_models --set qa.generator=spacy
+```
+
+### 4. Check the result before training / publishing
+```bash
+video-dataset verify-media        # every clip / frame the records reference exists and decodes
+video-dataset diversity           # attribute distributions + under-represented categories
+video-dataset stats
+```
+
+### 5. Hub: the old shards use the old schema - replace ALL of them, not only new ones
+```bash
+python scripts/hf_refresh.py --dry-run
+python scripts/hf_refresh.py              # re-annotate + push every shard, refresh the card
+```
+
 ## Clean Up Failed/Incomplete Videos
 
 ### View what can be cleaned

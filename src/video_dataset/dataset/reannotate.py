@@ -23,7 +23,7 @@ from typing import Any
 
 from video_dataset.config import PipelineConfig
 from video_dataset.dataset.aggregate import _write_dataset_files
-from video_dataset.dataset.curation import annotate_records, split_manifest, subset_records
+from video_dataset.dataset.curation import annotate_records, split_manifest, subset_records, video_info_from_manifests
 from video_dataset.dataset.export import (
     CINEMATIC_DIR,
     DATASET_FILES,
@@ -34,7 +34,7 @@ from video_dataset.dataset.export import (
     write_schema_file,
 )
 from video_dataset.dataset.negatives import caption_hard_negatives, qa_hard_negatives
-from video_dataset.dataset.stats import compute_statistics
+from video_dataset.dataset.stats import compute_diversity, compute_statistics
 from video_dataset.schemas.events import Event
 from video_dataset.schemas.qa import QARecord
 from video_dataset.schemas.vision import ObjectAnnotation, SceneAnalysis
@@ -174,7 +174,8 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
         raise FileNotFoundError(f"no dataset records found in {shard_dir}")
     records = upgrade_records(records)
     neg_counts = rebuild_hard_negatives(records, int(config.export.hard_negatives_per_record), int(config.qa.seed), only_missing=False) if rebuild_negatives and config.export.hard_negatives else {}
-    curation = annotate_records(records, config.export)
+    video_info = video_info_from_manifests(manifests, float(config.deduplication.video_similarity_threshold), bool(config.deduplication.video_fingerprint))
+    curation = annotate_records(records, config.export, video_info, config.licensing, seed=int(config.qa.seed))
     splits = split_manifest(records)
 
     counts, combined_rows, typed_counts, parquet_rows = _write_dataset_files(records, out, config)
@@ -206,7 +207,8 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
     videos = [{"video_id": m.get("video_id"), "duration": m.get("duration"), "status": "done"} for m in new_manifests]
     stats = compute_statistics(videos, records, [m.get("validation_summary", {}) for m in new_manifests], extra={
         "reannotated": True, "typed_parquet_counts": typed_counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows,
-        "cinematic": {**curation, "files": cinematic_counts}, "hard_negatives_rebuilt": neg_counts, "jsonl_counts": counts,
+        "cinematic": {**curation, "files": cinematic_counts}, "curation": curation, "hard_negatives_rebuilt": neg_counts, "jsonl_counts": counts,
+        "diversity": compute_diversity(records, new_manifests),
     })
     write_json_atomic(out / "statistics.json", stats)
     write_json_atomic(out / "manifest.json", {"videos": new_manifests, "counts": counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows, "splits": {k: len(v) for k, v in splits.items()}, "cinematic": cinematic_counts, "reannotated": True})
@@ -313,15 +315,23 @@ def push_shard(
 
 
 def update_dataset_card(config: PipelineConfig, token: str) -> str:
-    """Overwrite README.md on the Hub with the current card (loader configs now point at Parquet)."""
+    """Refresh the loader `configs:` block of README.md on the Hub (or create the card when there is
+    none). The rest of an existing card is kept. Returns the commit URL, or "" when it was current."""
     from huggingface_hub import HfApi
 
-    from video_dataset.dataset.upload import dataset_card
+    from video_dataset.dataset.upload import dataset_card, merge_card_configs
 
     cfg = config.upload
     api = HfApi(token=token)
+    if api.file_exists(cfg.repo_id, "README.md", repo_type=cfg.repo_type):
+        current = Path(api.hf_hub_download(cfg.repo_id, "README.md", repo_type=cfg.repo_type)).read_text(encoding="utf-8")
+        body = merge_card_configs(current, cfg)
+        if body == current:
+            return ""
+    else:
+        body = dataset_card(cfg, config)
     info = api.upload_file(
-        path_or_fileobj=dataset_card(cfg, config).encode("utf-8"), path_in_repo="README.md", repo_id=cfg.repo_id,
-        repo_type=cfg.repo_type, commit_message="Update dataset card: Parquet loader configs, split / tier fields",
+        path_or_fileobj=body.encode("utf-8"), path_in_repo="README.md", repo_id=cfg.repo_id,
+        repo_type=cfg.repo_type, commit_message="Update dataset card: loader configs point at the per-type Parquet files",
     )
     return str(getattr(info, "commit_url", None) or info)

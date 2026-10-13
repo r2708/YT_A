@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 
 from video_dataset.schemas.common import BaseSchema, ConfidenceSource
 from video_dataset.schemas.curation import HardNegative, Split, Tier
@@ -21,6 +21,7 @@ from video_dataset.schemas.vision import (
     Measurements,
     SubjectMotion,
     VisualStyle,
+    camera_fields_from_style,
 )
 
 
@@ -30,7 +31,8 @@ class _Curated(BaseSchema):
     split: Split | None = None  # train / validation / test, assigned per source video (no leakage across scenes)
     tier: Tier | None = None  # gold / silver / bronze, derived from validation status + quality + confidence provenance
     tier_reasons: list[str] = Field(default_factory=list)  # why the record did not reach a higher tier
-    subsets: list[str] = Field(default_factory=list)  # named subsets the record belongs to, e.g. ["cinematic"]
+    subsets: list[str] = Field(default_factory=list)  # named subsets the record belongs to, e.g. ["cinematic", "licensed"]
+    canonical_video_id: str | None = None  # set when the source video is a near-duplicate of another video (split follows the canonical one)
 
 
 class FrameCaptionRecord(_Curated):
@@ -38,6 +40,7 @@ class FrameCaptionRecord(_Curated):
     record_type: str = "frame"
     video_id: str
     scene_id: str
+    clip_id: str | None = None  # the clip this frame belongs to (video -> clip -> frame); filled at export time
     frame_id: str
     frame_path: str
     timestamp: float
@@ -49,6 +52,7 @@ class FrameCaptionRecord(_Curated):
     environment: Environment | None = None
     measurements: Measurements | None = None
     ocr_text: list[str] = Field(default_factory=list)
+    quality_flags: list[str] = Field(default_factory=list)  # measured visual-quality flags of the shot
     provider: str | None = None
     confidence: float | None = None
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
@@ -67,7 +71,13 @@ class ClipCaptionRecord(_Curated):
     end_time: float
     media_duration: float | None = None  # measured length of the clip file
     exact: bool = True  # the file covers exactly start_time..end_time (within frame_sampling.clip_tolerance_seconds)
-    description: str
+    fps: float | None = None  # measured on the clip file
+    width: int | None = None
+    height: int | None = None
+    description: str  # raw analysis description (what the analyzer saw / measured)
+    generation_prompt: str | None = None  # the same shot as a text-to-video prompt, built from the structured fields only
+    prompt_variants: list[str] = Field(default_factory=list)  # template / synonym rewrites of generation_prompt (same facts)
+    quality_flags: list[str] = Field(default_factory=list)
     actions: list[str] = Field(default_factory=list)
     camera: CameraAnnotation | None = None
     subject_motion: SubjectMotion | None = None  # measured subject motion separated from the camera motion
@@ -90,7 +100,11 @@ class SceneRecord(_Curated):
     start_time: float = Field(validation_alias=AliasChoices("start_time", "start"))
     end_time: float = Field(validation_alias=AliasChoices("end_time", "end"))
     duration: float
-    summary: str
+    transition_in: str | None = None  # start | cut | fade | dissolve | adaptive | split: how the shot begins
+    summary: str  # raw analysis description
+    generation_prompt: str | None = None  # text-to-video prompt assembled from the structured fields (no free-form claims)
+    prompt_variants: list[str] = Field(default_factory=list)  # template / synonym rewrites of generation_prompt (same facts)
+    quality_flags: list[str] = Field(default_factory=list)  # blurry | underexposed | overexposed | compression_artifacts | low_resolution | low_bitrate
     environment: Environment
     objects: list[str] = Field(default_factory=list)
     object_details: list[dict[str, Any]] = Field(default_factory=list)
@@ -112,6 +126,13 @@ class SceneRecord(_Curated):
     validation: ValidationInfo | None = None
     hard_negatives: list[HardNegative] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _camera_from_style(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("camera"), dict):
+            data = {**data, "camera": camera_fields_from_style(data["camera"], data.get("visual_style"))}
+        return data
+
 
 class EventRecord(_Curated):
     record_id: str
@@ -131,6 +152,36 @@ class EventRecord(_Curated):
     confidence: float | None = None
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     relations: list[dict[str, Any]] = Field(default_factory=list)  # outgoing relations
+    quality: QualityScore | None = None
+    validation: ValidationInfo | None = None
+
+
+class SequenceRecord(_Curated):
+    """A longer, coherent run of consecutive shots of one video (split parts of a long shot rejoined,
+    or cuts whose setting and subjects agree): the unit for longer motion sequences."""
+
+    record_id: str
+    record_type: str = "sequence"
+    video_id: str
+    sequence_id: str
+    scene_ids: list[str]
+    clip_ids: list[str] = Field(default_factory=list)
+    start_time: float
+    end_time: float
+    duration: float
+    n_shots: int
+    coherence: list[str] = Field(default_factory=list)  # why the shots were joined: rejoined_split | same_setting | shared_subject
+    subjects: list[str] = Field(default_factory=list)  # object classes present in every joined shot
+    setting: str | None = None
+    time_of_day: str | None = None
+    camera_movements: list[str] = Field(default_factory=list)  # per shot, standardized family (+ direction)
+    summary: str  # the shot summaries in order
+    generation_prompt: str | None = None
+    shot_prompts: list[str] = Field(default_factory=list)  # the joined shots' own generation prompts, in order
+    prompt_variants: list[str] = Field(default_factory=list)
+    provider: str | None = None
+    confidence: float | None = None
+    confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
 

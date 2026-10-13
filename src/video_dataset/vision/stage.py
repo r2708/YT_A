@@ -95,7 +95,10 @@ def vision_stage(ctx: VideoContext) -> StageOutput:
             scan=scans.get(scene.scene_id),
             previous_summary=previous_summary,
             video_title=ctx.metadata.title,
-            extra={"clip_path": clips[scene.scene_id].clip_path} if scene.scene_id in clips else {},
+            extra={
+                **({"clip_path": clips[scene.scene_id].clip_path} if scene.scene_id in clips else {}),
+                **({"video_path": str(ctx.video_path)} if ctx.video_path.exists() else {}),
+            },
         )
 
     def _analyze(scene: Scene, context: AnalysisContext) -> tuple[SceneAnalysis, bool, bool]:

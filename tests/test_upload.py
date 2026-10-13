@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from video_dataset.config import load_config
+from video_dataset.config import UploadConfig, load_config
 from video_dataset.dataset import upload as up
-from video_dataset.dataset.export import DATASET_FILES
+from video_dataset.dataset.export import CINEMATIC_DIR, DATASET_FILES, SCHEMA_FILE, SPLITS_FILE
 from video_dataset.utils.io import read_jsonl, write_json_atomic, write_jsonl
 
 
@@ -57,14 +57,20 @@ def _fake_final(cfg, videos: list[str], rows_per_video: int = 3, media: bool = T
             c.write_bytes(b"m" * 5000)
     for n in DATASET_FILES:
         write_jsonl(final / f"{n}.jsonl", records[n])
+        (final / f"{n}.parquet").write_bytes(b"p" * 50)  # typed per-type Parquet (what the card configs read)
     write_jsonl(final / "dataset.jsonl", [{"record_type": "frame", **r} for r in records["frames"]])
     (final / "dataset.parquet").write_bytes(b"p" * 100)
+    write_json_atomic(final / SCHEMA_FILE, {"frames": {"type": "object"}})
+    write_json_atomic(final / SPLITS_FILE, {"videos": {"train": videos}})
+    (final / CINEMATIC_DIR).mkdir(exist_ok=True)
+    write_jsonl(final / CINEMATIC_DIR / "scenes.jsonl", [])
+    (final / CINEMATIC_DIR / "scenes.parquet").write_bytes(b"p" * 50)
     write_json_atomic(final / "statistics.json", {"frames": len(records["frames"])})
     write_json_atomic(final / "manifest.json", {"videos": [{"video_id": v} for v in videos]})
 
 
 def _cfg(tmp_path: Path, **over):
-    base = {"project.data_dir": str(tmp_path / "data"), "project.log_level": "ERROR", "upload.provider": "huggingface", "upload.repo_id": "u/d", "upload.threshold_mb": "0.001"}
+    base = {"project.data_dir": str(tmp_path / "data"), "project.log_level": "ERROR", "upload.provider": "huggingface", "upload.repo_id": "u/d", "upload.threshold_mb": "0.001", "upload.after_upload": "archive"}
     base.update(over)
     return load_config(None, base)
 
@@ -101,6 +107,10 @@ def test_threshold_upload_archives_and_starts_new_shard(tmp_path: Path):
     assert set(res["videos"]) == {"vid_a", "vid_b"} and res["after_upload"] == "archive"
     # staged content: dataset files + per-video exports, no media by default, no state file
     assert "frames.jsonl" in fake.staged_files and "dataset.parquet" in fake.staged_files and "manifest.json" in fake.staged_files
+    for n in DATASET_FILES:  # the per-type Parquet files are what the dataset card's configs point at
+        assert f"{n}.parquet" in fake.staged_files, n
+    assert SCHEMA_FILE in fake.staged_files and SPLITS_FILE in fake.staged_files
+    assert f"{CINEMATIC_DIR}/scenes.parquet" in fake.staged_files and f"{CINEMATIC_DIR}/scenes.jsonl" in fake.staged_files
     assert "per_video/vid_a/frames.jsonl" in fake.staged_files
     assert not any(f.startswith("frames/") or f.startswith("clips/") for f in fake.staged_files)
     assert up.STATE_FILE not in fake.staged_files
@@ -108,6 +118,8 @@ def test_threshold_upload_archives_and_starts_new_shard(tmp_path: Path):
     assert not (cfg.export_dir / "frames.jsonl").exists() and not (cfg.export_dir / "per_video" / "vid_a").exists()
     archive = cfg.export_dir / "uploaded" / "shard_0001"
     assert (archive / "frames.jsonl").exists() and (archive / "per_video" / "vid_b" / "manifest.json").exists()
+    assert (archive / "frames.parquet").exists() and (archive / CINEMATIC_DIR / "scenes.parquet").exists()
+    assert not (cfg.export_dir / CINEMATIC_DIR).exists()
     assert (cfg.data_dir / "frames" / "vid_a" / "scene_001" / "f0.jpg").exists()
     state = up.UploadState.load(cfg.export_dir)
     assert state.next_shard == 2 and state.shards[0]["videos"] == ["vid_a", "vid_b"] and state.uploaded_videos == {"vid_a", "vid_b"}
@@ -135,7 +147,7 @@ def test_include_media_and_delete_mode(tmp_path: Path):
     assert not (cfg.export_dir / "frames.jsonl").exists() and not (cfg.export_dir / "uploaded").exists()
     assert not (cfg.data_dir / "frames" / "vid_a").exists() and not (cfg.data_dir / "clips" / "vid_a").exists()
     card = next(c[1] for c in fake.calls if c[0] == "card")
-    assert 'data_files: "v1/shard_*/temporal_qa.jsonl"' in card and "frames/" in card
+    assert 'data_files: "v1/shard_*/temporal_qa.parquet"' in card and "frames/" in card
 
 
 def test_upload_retries_then_succeeds_and_staging_is_cleaned(tmp_path: Path, monkeypatch):
@@ -199,5 +211,39 @@ def test_cli_upload_status_and_dry_run(tmp_path: Path):
     assert "would upload shard_0001" in r.output
     assert json.loads((cfg.export_dir / "manifest.json").read_text())["videos"]  # untouched
     cli.state.config = None  # the CLI caches the config per process; a fresh process would not have the --set values
-    r = runner.invoke(cli.app, ["--data-dir", str(cfg.data_dir), "upload"])
+    r = runner.invoke(cli.app, ["--data-dir", str(cfg.data_dir), "--set", "upload.provider=none", "upload"])
     assert r.exit_code == 1 and "upload.provider" in r.output
+
+
+# ----------------------------------------------------------------------------- dataset card configs
+def _ucfg(**over) -> UploadConfig:
+    return UploadConfig(**{"provider": "huggingface", "repo_id": "u/d", **over})
+
+
+def test_merge_card_configs_adds_block_to_hand_written_card():
+    readme = "---\nlicense: mit\npretty_name: My Set\ntags:\n- video\n---\n\n# My Set\n\nBody text.\n"
+    out = up.merge_card_configs(readme, _ucfg())
+    fm, body = out.split("---\n", 2)[1:]
+    assert fm.startswith("license: mit\npretty_name: My Set\ntags:\n- video\nconfigs:\n")
+    assert all(f'- config_name: {n}\n  data_files: "shard_*/{n}.parquet"' in fm for n in DATASET_FILES)
+    assert body == "\n# My Set\n\nBody text.\n"  # everything after the front matter untouched
+    assert up.merge_card_configs(out, _ucfg()) == out  # idempotent -> ensure_card uploads nothing
+
+
+def test_merge_card_configs_replaces_stale_block_and_keeps_following_keys():
+    readme = "---\npretty_name: d\nconfigs:\n- config_name: old\n  data_files: \"shard_*/old.jsonl\"\nlicense: mit\n---\n# d\n"
+    out = up.merge_card_configs(readme, _ucfg(path_in_repo="v1"))
+    assert "old.jsonl" not in out and "license: mit" in out and out.endswith("---\n# d\n")
+    assert 'data_files: "v1/shard_*/frames.parquet"' in out
+    assert out.count("configs:") == 1
+
+
+def test_merge_card_configs_without_front_matter():
+    out = up.merge_card_configs("# plain\n", _ucfg())
+    assert out.startswith("---\nconfigs:\n- config_name: frames\n") and out.endswith("---\n\n# plain\n")
+
+
+def test_generated_card_round_trips_through_merge(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    card = up.dataset_card(cfg.upload, cfg)
+    assert up.merge_card_configs(card, cfg.upload) == card

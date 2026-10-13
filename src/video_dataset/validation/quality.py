@@ -4,11 +4,31 @@ from __future__ import annotations
 
 import re
 
+from video_dataset.config import QualityConfig
 from video_dataset.schemas.common import ConfidenceSource
 from video_dataset.schemas.events import Event
 from video_dataset.schemas.qa import QARecord
 from video_dataset.schemas.quality import QualityScore
-from video_dataset.schemas.vision import SceneAnalysis, VerificationVerdict
+from video_dataset.schemas.vision import Measurements, SceneAnalysis, VerificationVerdict
+
+
+def scene_quality_flags(m: Measurements | None, video_flags: list[str] | None, cfg: QualityConfig) -> list[str]:
+    """Measured visual-quality flags of one shot: its own frame statistics plus the source video's
+    flags (resolution / bitrate). Order is stable so records compare cleanly."""
+    flags: list[str] = []
+    if m is not None:
+        if float(cfg.min_sharpness) > 0 and m.sharpness is not None and m.sharpness < float(cfg.min_sharpness):
+            flags.append("blurry")
+        if m.dark_fraction is not None and m.dark_fraction > float(cfg.max_dark_fraction):
+            flags.append("underexposed")
+        if m.bright_fraction is not None and m.bright_fraction > float(cfg.max_bright_fraction):
+            flags.append("overexposed")
+        if float(cfg.max_blockiness) > 0 and m.blockiness is not None and m.blockiness > float(cfg.max_blockiness):
+            flags.append("compression_artifacts")
+    for f in video_flags or []:
+        if f in ("low_resolution", "low_bitrate") and f not in flags:
+            flags.append(f)
+    return flags
 
 _GENERIC = {"cinematic", "beautiful", "stunning", "amazing", "nice", "great", "interesting", "various", "some", "thing", "things", "stuff"}
 _PLACEHOLDER = {"unknown", "unmeasured", "n/a", "null", "none"}

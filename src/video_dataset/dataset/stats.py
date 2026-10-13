@@ -67,6 +67,7 @@ def compute_statistics(
         "scenes": len(records.get("scenes", [])),
         "frames": len(records.get("frames", [])),
         "clips": len(records.get("clips", [])),
+        "sequences": len(records.get("sequences", [])),
         "events": len(records.get("events", [])),
         "events_by_type": events_by_type,
         "temporal_relations": relations,
@@ -94,6 +95,117 @@ def _count_by(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
         k = str(r.get(key))
         out[k] = out.get(k, 0) + 1
     return out
+
+
+# ------------------------------------------------------------------------------------ diversity
+_UNKNOWN = {None, "", "unknown", "None", "unassigned"}
+_DURATION_BUCKETS = [(0, 2, "<2s"), (2, 5, "2-5s"), (5, 10, "5-10s"), (10, 30, "10-30s"), (30, 1e9, ">=30s")]
+_AESTHETIC_BUCKETS = [(0, 4, "<4"), (4, 5, "4-5"), (5, 6, "5-6"), (6, 7, "6-7"), (7, 11, ">=7")]
+
+
+def _bucket(value: float | None, buckets: list[tuple[float, float, str]]) -> str:
+    if value is None:
+        return "unknown"
+    for lo, hi, name in buckets:
+        if lo <= float(value) < hi:
+            return name
+    return "unknown"
+
+
+def _dist(values: Iterable[Any]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for v in values:
+        k = "unknown" if v in _UNKNOWN else str(v)
+        out[k] = out.get(k, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _underrepresented(dist: dict[str, int], floor_fraction: float = 0.5) -> list[dict[str, Any]]:
+    """Known categories whose share is below ``floor_fraction`` of the uniform share (1 / n_known)."""
+    known = {k: n for k, n in dist.items() if k != "unknown"}
+    total = sum(known.values())
+    if total == 0 or len(known) < 2:
+        return []
+    floor = floor_fraction / len(known)
+    return [{"value": k, "count": n, "share": round(n / total, 4)} for k, n in sorted(known.items(), key=lambda kv: kv[1]) if n / total < floor]
+
+
+def compute_diversity(records: dict[str, list[dict[str, Any]]], manifests: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Distributions of the dataset's measured / labelled attributes over scene records (camera,
+    subjects, environment, lighting, colour, motion, duration, quality) and per-video facts
+    (license, resolution, near-duplicates), with the under-represented categories of each listed."""
+    scenes = [r for r in records.get("scenes", []) if isinstance(r, dict)]
+    cam = [r.get("camera") or {} for r in scenes]
+    env = [r.get("environment") or {} for r in scenes]
+    meas = [r.get("measurements") or {} for r in scenes]
+    sm = [r.get("subject_motion") or {} for r in scenes]
+    dims: dict[str, dict[str, int]] = {
+        "shot_size": _dist(c.get("shot_size") for c in cam),
+        "camera_movement": _dist(c.get("camera_movement") for c in cam),
+        "camera_movement_direction": _dist(f"{c.get('camera_movement')}_{c.get('movement_direction')}" if c.get("movement_direction") else c.get("camera_movement") for c in cam),
+        "movement_speed": _dist(c.get("movement_speed") for c in cam),
+        "camera_angle": _dist(c.get("camera_angle") for c in cam),
+        "setting": _dist(e.get("setting") for e in env),
+        "time_of_day": _dist(e.get("time_of_day") for e in env),
+        "lighting_level": _dist(m.get("lighting_level") for m in meas),
+        "color_temperature": _dist(m.get("color_temperature") for m in meas),
+        "exposure": _dist(m.get("exposure") for m in meas),
+        "subject_motion": _dist(s.get("label") for s in sm),
+        "subject_direction": _dist(s.get("direction") for s in sm),
+        "transition_in": _dist(r.get("transition_in") for r in scenes),
+        "scene_duration": _dist(_bucket(r.get("duration"), _DURATION_BUCKETS) for r in scenes),
+        "aesthetic_score": _dist(_bucket(m.get("aesthetic_score"), _AESTHETIC_BUCKETS) for m in meas),
+        "provider": _dist(r.get("provider") for r in scenes),
+    }
+    subjects: dict[str, int] = {}
+    for r in scenes:
+        for o in set(str(x).lower() for x in (r.get("objects") or [])):
+            subjects[o] = subjects.get(o, 0) + 1
+    flags: dict[str, int] = {}
+    for r in scenes:
+        for f in r.get("quality_flags") or []:
+            flags[str(f)] = flags.get(str(f), 0) + 1
+    videos = [m for m in (manifests or []) if isinstance(m, dict) and m.get("video_id")]
+    video_dims = {
+        "license_status": _dist(m.get("license_status") for m in videos),
+        "source_height": _dist((m.get("media") or {}).get("height") for m in videos),
+        "near_duplicate": _dist("duplicate" if m.get("canonical_video_id") or m.get("near_duplicate_of") else "unique" for m in videos),
+    }
+    return {
+        "scenes": len(scenes),
+        "videos": len(videos),
+        "dimensions": dims,
+        "subjects": dict(sorted(subjects.items(), key=lambda kv: (-kv[1], kv[0]))[:40]),
+        "distinct_subjects": len(subjects),
+        "quality_flags": dict(sorted(flags.items(), key=lambda kv: -kv[1])),
+        "videos_by": video_dims,
+        "underrepresented": {k: v for k, v in ((k, _underrepresented(d)) for k, d in dims.items()) if v},
+        "unknown_fraction": {k: round(d.get("unknown", 0) / max(1, sum(d.values())), 3) for k, d in dims.items()},
+    }
+
+
+def format_diversity(div: dict[str, Any], top: int = 8) -> str:
+    lines = ["Dataset Diversity", "-----------------", f"scenes: {div.get('scenes', 0):,}   videos: {div.get('videos', 0):,}   distinct subjects: {div.get('distinct_subjects', 0)}", ""]
+    for key, dist in (div.get("dimensions") or {}).items():
+        total = sum(dist.values()) or 1
+        parts = [f"{k} {n} ({n / total:.0%})" for k, n in list(dist.items())[:top]]
+        lines.append(f"{key:<28} " + ", ".join(parts))
+    if div.get("subjects"):
+        lines.append("")
+        lines.append("top subjects: " + ", ".join(f"{k} {n}" for k, n in list(div["subjects"].items())[:top * 2]))
+    for key, dist in (div.get("videos_by") or {}).items():
+        lines.append(f"videos by {key:<18} " + ", ".join(f"{k} {n}" for k, n in list(dist.items())[:top]))
+    if div.get("quality_flags"):
+        lines.append("quality flags: " + ", ".join(f"{k} {n}" for k, n in div["quality_flags"].items()))
+    under = div.get("underrepresented") or {}
+    lines.append("")
+    if under:
+        lines.append("under-represented (below half the uniform share):")
+        for key, items in under.items():
+            lines.append(f"  {key}: " + ", ".join(f"{i['value']} ({i['share']:.1%})" for i in items))
+    else:
+        lines.append("no under-represented category")
+    return "\n".join(lines)
 
 
 def format_statistics(stats: dict[str, Any]) -> str:

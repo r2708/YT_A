@@ -92,6 +92,7 @@ Each record type comes as `<type>.parquet` (explicit schema, what loaders should
 - **`scenes`** - Scene-level descriptions and analysis
 - **`frames`** - Frame-level captions and metadata
 - **`clips`** - Video clip descriptions
+- **`sequences`** - Longer coherent runs of consecutive shots (rejoined split takes, cuts with the same setting and subjects) with a joined generation prompt
 - **`events`** - Timeline events with temporal relations
 - **`video_descriptions`** - Video-level descriptions
 - **`dataset.jsonl`** - All records combined (single file, each line tagged with `record_type`)
@@ -116,6 +117,7 @@ temporal_qa.parquet / temporal_qa.jsonl
 scenes.parquet / scenes.jsonl                    
 frames.parquet / frames.jsonl                    
 clips.parquet / clips.jsonl                      
+sequences.parquet / sequences.jsonl              
 events.parquet / events.jsonl                    
 video_descriptions.parquet / video_descriptions.jsonl  
 dataset.parquet / dataset.jsonl                  
@@ -274,7 +276,14 @@ All records include:
 - **Evidence grounding** - All answers are backed by concrete evidence
 - **Quality metrics** - Grounding, temporal accuracy, description quality
 - **Tier** - gold (accepted, grounded, high quality), silver (accepted, measured quality >= 0.6), bronze (everything else exported); `tier_reasons` explains the gap
-- **Split** - per source video, so evaluation never sees scenes of a training video
+- **Split** - per source video, so evaluation never sees scenes of a training video; near-duplicate videos (perceptual fingerprint) share one `canonical_video_id` and therefore one split
+- **`quality_flags`** on scene / clip / frame records - measured: `blurry`, `underexposed`, `overexposed`, `compression_artifacts`, `low_resolution`, `low_bitrate` (flagged shots are review / at most silver / never cinematic)
+- **Consistency** - shots whose annotations contradict each other (camera label vs optical flow, static camera vs tracked subject, lighting label vs brightness, caption vs camera field) are rejected; `validation.checks.consistent`
+- **Caption alignment** - `validation.checks.caption_alignment` and `enrichments.caption_alignment` (CLIP rank of the shot's own caption among the video's captions)
+- **`subject_motion.method`** - `tracker` (YOLO + IoU tracks through the shot, with `trajectory` and `direction`) or `sampled_frames`
+- **`transition_in`** on scene records - `start`, `cut`, `fade`, `dissolve`, `split`
+- **`generation_prompt` + `prompt_variants`** on scene, clip and sequence records - built from the structured fields only; the variants are template / synonym rewrites of the same facts
+- **`subsets`** - `cinematic`, and `licensed` for videos whose source license is Creative Commons (`license_status` in `manifest.json`)
 
 Questions are generated from timeline events (not hallucinated), ensuring high-quality, verifiable question-answer pairs.
 

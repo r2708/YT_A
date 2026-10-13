@@ -106,11 +106,17 @@ class YOLODetector:
         """Run detection on several images at once. Returns one list of detections per image."""
         if not image_paths:
             return []
+        return self._predict([str(p) for p in image_paths])
+
+    def detect_arrays(self, images: list[Any]) -> list[list[dict[str, Any]]]:
+        """Detection on in-memory BGR arrays (the tracker's decoded frames)."""
+        if not images:
+            return []
+        return self._predict(list(images))
+
+    def _predict(self, source: list[Any]) -> list[list[dict[str, Any]]]:
         self.load()
-        results = self._model.predict(
-            source=[str(p) for p in image_paths], conf=self.confidence, device=self.device,
-            imgsz=self.image_size, verbose=False,
-        )
+        results = self._model.predict(source=source, conf=self.confidence, device=self.device, imgsz=self.image_size, verbose=False)
         out: list[list[dict[str, Any]]] = []
         for res in results:
             dets: list[dict[str, Any]] = []

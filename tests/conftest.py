@@ -42,5 +42,13 @@ def test_config(tmp_path: Path):
         "pipeline.stage_retries": "0",
         "pipeline.stage_workers": "3",  # exercise the intra-stage thread pools
         "cleanup.after_export": "none",  # the tests read the working files after EXPORT
+        # the synthetic video is flat colour: no texture (Laplacian ~0) and a black scene, which the
+        # production quality thresholds would rightly flag; keep them out of the functional tests
+        "quality.min_sharpness": "0",
+        "quality.max_dark_fraction": "1.0",
+        "quality.max_bright_fraction": "1.0",
+        "quality.max_blockiness": "0",
+        "quality.min_height": "0",  # the synthetic video is 640x360 at a tiny bitrate
+        "quality.min_bitrate_kbps": "0",
     }
     return load_config(None, overrides, config_dir=ROOT / "config")

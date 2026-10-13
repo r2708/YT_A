@@ -180,10 +180,10 @@ class EventExtractor:
     def _transition_events(self, video_id: str, scenes: list[Scene], frames: list[Frame], analyses: dict[str, SceneAnalysis], duration: float) -> list[Event]:
         out: list[Event] = []
         for i, scene in enumerate(scenes):
-            if scene.transition_in not in (TransitionType.CUT, TransitionType.FADE, TransitionType.ADAPTIVE):
+            if scene.transition_in not in (TransitionType.CUT, TransitionType.FADE, TransitionType.DISSOLVE, TransitionType.ADAPTIVE):
                 continue
             prev = scenes[i - 1] if i > 0 else None
-            kind = "fade" if scene.transition_in == TransitionType.FADE else "cut"
+            kind = {TransitionType.FADE: "fade", TransitionType.DISSOLVE: "dissolve"}.get(scene.transition_in, "cut")
             a_prev = analyses.get(prev.scene_id) if prev else None
             a_cur = analyses.get(scene.scene_id)
             generative = bool(a_prev and a_cur and a_prev.provider not in ("heuristic", None) and a_cur.provider not in ("heuristic", None))

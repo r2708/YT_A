@@ -39,5 +39,6 @@ class LocalFileSource:
             source_type=SourceType.LOCAL,
             title=src.stem,
             format=src.suffix.lstrip(".").lower(),
+            license_status="unknown",
         )
         return FetchResult(status, dest, metadata)

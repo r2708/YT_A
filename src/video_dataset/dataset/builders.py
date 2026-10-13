@@ -121,6 +121,7 @@ class DatasetBuilder:
                         environment=a.environment,
                         measurements=measurements,
                         ocr_text=sorted(set(ocr_by_frame.get(f.frame_id, []))),
+                        quality_flags=list(a.quality_flags),
                         provider=a.provider,
                         confidence=conf,
                         confidence_source=ConfidenceSource(conf_src),
@@ -155,7 +156,11 @@ class DatasetBuilder:
                     end_time=c.end_time,
                     media_duration=c.media_duration,
                     exact=c.exact,
+                    fps=c.fps,
+                    width=c.width,
+                    height=c.height,
                     description=desc,
+                    quality_flags=list(a.quality_flags),
                     actions=a.actions,
                     camera=a.camera,
                     subject_motion=a.subject_motion,
@@ -171,14 +176,16 @@ class DatasetBuilder:
             )
         return out
 
-    def scenes(self, validated: ValidatedVideo, clips: list[Clip], transcript: Transcript | None, ocr: OCRResult | None) -> list[SceneRecord]:
+    def scenes(self, validated: ValidatedVideo, clips: list[Clip], transcript: Transcript | None, ocr: OCRResult | None, scenes: list[Scene] | None = None) -> list[SceneRecord]:
         out: list[SceneRecord] = []
         clip_by_scene = {c.scene_id: c for c in clips if not c.clip_id.count("_") > 1}
+        scene_by_id = {s.scene_id: s for s in (scenes or [])}
         kept = [vs.analysis for vs in validated.scenes if self._keep(vs.validation) and vs.analysis.summary]
         for vs in validated.scenes:
             if not self._keep(vs.validation) or not vs.analysis.summary:
                 continue
             a = vs.analysis
+            sc = scene_by_id.get(a.scene_id)
             out.append(
                 SceneRecord(
                     record_id=record_id("scene", validated.video_id, a.scene_id),
@@ -187,6 +194,8 @@ class DatasetBuilder:
                     start_time=a.start_time,
                     end_time=a.end_time,
                     duration=round(a.end_time - a.start_time, 3),
+                    transition_in=str(sc.transition_in) if sc else None,
+                    quality_flags=list(a.quality_flags),
                     summary=a.summary or "",
                     environment=a.environment,
                     objects=[o.name for o in a.objects],
@@ -338,7 +347,7 @@ class DatasetBuilder:
                 light_labels.append(str(level).strip())
             if a.visual_style.lighting and "color temperature" in a.visual_style.lighting:
                 light_temps.append(a.visual_style.lighting.split(",")[-1].strip())
-            if s.transition_in in ("cut", "fade"):
+            if s.transition_in in ("cut", "fade", "dissolve"):
                 transitions.append(str(s.transition_in))
             confs.append(a.confidence)
             shots.append({"scene_id": s.scene_id, "start_time": s.start_time, "end_time": s.end_time, "summary": a.summary, "camera": cam or None, "transition_in": str(s.transition_in), "temporal_progression": a.temporal_progression})
