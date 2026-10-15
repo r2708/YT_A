@@ -690,6 +690,16 @@ def stages() -> None:
         console.print(f"{i:2d}. {s.value}")
 
 
+def _first_js_runtime(specs: list[str]) -> str:
+    """First configured JavaScript runtime found on PATH (yt-dlp needs one for YouTube)."""
+    for spec in specs or []:
+        name, _, path = str(spec).partition(":")
+        exe = shutil.which(path or name)
+        if exe:
+            return f"{name} ({exe})"
+    raise RuntimeError(f"none of [{', '.join(specs or [])}] installed - install node or deno")
+
+
 @app.command()
 def doctor(config: ConfigOpt = None, set_: SetOpt = None) -> None:
     """Check the environment: ffmpeg, GPU, optional model libraries."""
@@ -713,6 +723,8 @@ def doctor(config: ConfigOpt = None, set_: SetOpt = None) -> None:
     check("ffmpeg", lambda: find_ffmpeg(cfg.project.ffmpeg_path))
     check("ffprobe", lambda: find_ffprobe(cfg.project.ffprobe_path) or "not found (OpenCV fallback)")
     check("yt-dlp", lambda: __import__("yt_dlp").version.__version__)
+    check("yt-dlp-ejs (solver)", lambda: __import__("importlib.metadata").metadata.version("yt-dlp-ejs"))
+    check("js runtime (yt-dlp)", lambda: _first_js_runtime(cfg.download.js_runtimes))
     check("scenedetect", lambda: __import__("scenedetect").__version__)
     check("opencv", lambda: __import__("cv2").__version__)
     check("torch / device", lambda: f"{__import__('torch').__version__} -> {resolve_device(cfg.project.device)}")

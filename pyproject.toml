@@ -11,7 +11,8 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "WLIQ" }]
 dependencies = [
-  "yt-dlp>=2024.10.0",
+  "yt-dlp>=2025.11.12",      # first release with the EJS challenge solver (js_runtimes / remote_components)
+  "yt-dlp-ejs>=0.8.0",       # bundled solver script so no GitHub fetch is needed
   "opencv-python>=4.8",
   "numpy>=1.24",
   "scenedetect>=0.6.4",

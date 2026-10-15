@@ -50,6 +50,13 @@ class DownloadConfig(_Section):
     skip_existing: bool = True
     socket_timeout: int = 30
     extra_args: dict[str, Any] = Field(default_factory=dict)
+    # JavaScript runtimes yt-dlp may use to solve YouTube's signature / n-parameter challenges.
+    # yt-dlp enables only deno by default; entries are "name" or "name:/path/to/binary" and the first
+    # one that is installed is used. Empty list = yt-dlp's own default.
+    js_runtimes: list[str] = Field(default_factory=lambda: ["node", "deno", "bun"])
+    # Remote components yt-dlp may download (and cache) on demand, e.g. the EJS challenge-solver
+    # script from GitHub when the bundled yt-dlp-ejs package is missing or too old. Empty = never.
+    remote_components: list[str] = Field(default_factory=lambda: ["ejs:github"])
     # Hosts a URL may point at. Empty = any http(s) host yt-dlp supports. Suffix match, so
     # "youtube.com" also allows "www.youtube.com" and "m.youtube.com".
     allowed_domains: list[str] = Field(default_factory=list)

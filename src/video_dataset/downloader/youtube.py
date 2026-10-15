@@ -214,6 +214,31 @@ def _parse_rate_limit(value: str | None) -> int | None:
         return None
 
 
+
+def js_challenge_options(cfg: DownloadConfig) -> dict[str, Any]:
+    """yt-dlp options that let the YouTube extractor solve the player's signature / n-parameter challenges.
+
+    YouTube only hands out working stream URLs once the challenge embedded in its player JavaScript is
+    solved. Without a JS runtime and a solver script yt-dlp silently drops every video format and the
+    download fails with "Requested format is not available". yt-dlp enables only deno by default, so
+    the configured runtimes (node, deno, bun ... whichever is installed) are passed explicitly, and the
+    EJS solver script may be fetched from GitHub when the bundled ``yt-dlp-ejs`` package is missing or
+    older than what the installed yt-dlp needs. ``download.extra_args`` still overrides both keys.
+    """
+    out: dict[str, Any] = {}
+    runtimes: dict[str, dict[str, str]] = {}
+    for spec in cfg.js_runtimes or []:
+        name, _, path = str(spec).strip().partition(":")
+        name = name.strip().lower()
+        if name:
+            runtimes[name] = {"path": path.strip()} if path.strip() else {}
+    if runtimes:
+        out["js_runtimes"] = runtimes
+    if cfg.remote_components:
+        out["remote_components"] = {str(c).strip() for c in cfg.remote_components if str(c).strip()}
+    return out
+
+
 class YouTubeDownloader:
     name = "yt_dlp"
 
@@ -294,6 +319,7 @@ class YouTubeDownloader:
         rl = _parse_rate_limit(self.config.rate_limit)
         if rl:
             opts["ratelimit"] = rl
+        opts.update(js_challenge_options(self.config))
         opts.update(self.config.extra_args or {})
         self._apply_cookie_options(opts)
         return opts

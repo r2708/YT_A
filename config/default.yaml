@@ -24,6 +24,10 @@ download:
   skip_existing: true
   socket_timeout: 30
   extra_args: {}           # passed straight to yt-dlp options
+  js_runtimes: [node, deno, bun]   # JS runtimes yt-dlp may use to solve YouTube's player challenges; first one
+                                   # installed wins. "name:/path/to/binary" pins a binary. Without any runtime
+                                   # YouTube returns no video formats ("Requested format is not available").
+  remote_components: ["ejs:github"]  # let yt-dlp fetch + cache the EJS solver script if yt-dlp-ejs is missing/old
   allowed_domains: []      # e.g. [youtube.com, youtu.be]; empty = any http(s) site yt-dlp supports
 
 limits:
