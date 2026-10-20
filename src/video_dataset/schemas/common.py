@@ -8,6 +8,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# Version of the exported record schemas. Bump the minor part whenever a field is added, the major
+# part whenever a field changes meaning or is removed; every exported record and manifest carries it.
+SCHEMA_VERSION = "2.1.0"
+
 
 class StrEnum(str, Enum):
     def __str__(self) -> str:  # pragma: no cover - trivial
@@ -38,7 +42,12 @@ class BaseSchema(BaseModel):
 
 
 class TimeSpan(BaseSchema):
-    """A closed interval in seconds relative to the start of the video."""
+    """An interval in seconds relative to the start of the source video.
+
+    Convention (used everywhere in the pipeline): ``start_time`` is inclusive, ``end_time`` is the
+    first instant *not* covered, i.e. half-open ``[start_time, end_time)``. Consecutive shots share
+    their boundary time, a clip cut for ``[s, e)`` holds ``round((e - s) * fps)`` frames, and
+    ``contains_time`` / ``overlaps`` treat the end as exclusive up to the tolerance."""
 
     start_time: float = Field(ge=0.0)
     end_time: float = Field(ge=0.0)

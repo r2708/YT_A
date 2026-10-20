@@ -80,8 +80,10 @@ def test_annotate_records_keeps_every_record_of_a_video_in_one_split():
     manifest = split_manifest(rows)
     assert sum(len(v) for v in manifest.values()) == 7
     assert all(r["tier"] == "gold" for r in rows["scenes"]) and all(r["tier"] == "bronze" for r in rows["temporal_qa"])
-    assert all(r["subsets"] == ["cinematic"] for r in rows["scenes"])  # accepted, known camera, long enough
-    assert all(r["subsets"] == ["cinematic"] for r in rows["temporal_qa"])  # inherits from its evidence scene
+    assert all("cinematic" in r["subsets"] for r in rows["scenes"])  # accepted, known camera, long enough
+    assert all("duration_medium" in r["subsets"] for r in rows["scenes"])  # 3.0 s falls in the medium band
+    assert all("cinematic" in r["subsets"] for r in rows["temporal_qa"])  # inherits from its evidence scene
+    assert all(r["source_group_id"] == r["video_id"] and r["schema_version"] for r in rows["scenes"])
     assert len(subset_records(rows, "cinematic")["scenes"]) == 50
 
 

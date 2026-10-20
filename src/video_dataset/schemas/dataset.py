@@ -31,8 +31,20 @@ class _Curated(BaseSchema):
     split: Split | None = None  # train / validation / test, assigned per source video (no leakage across scenes)
     tier: Tier | None = None  # gold / silver / bronze, derived from validation status + quality + confidence provenance
     tier_reasons: list[str] = Field(default_factory=list)  # why the record did not reach a higher tier
-    subsets: list[str] = Field(default_factory=list)  # named subsets the record belongs to, e.g. ["cinematic", "licensed"]
+    subsets: list[str] = Field(default_factory=list)  # named subsets the record belongs to, e.g. ["cinematic", "licensed", "strict"]
     canonical_video_id: str | None = None  # set when the source video is a near-duplicate of another video (split follows the canonical one)
+    # The split group: the canonical video id of a near-duplicate cluster, else the video id. Every
+    # record of one group is in one split; `release-check` proves it.
+    source_group_id: str | None = None
+    schema_version: str | None = None  # SCHEMA_VERSION the record was written with
+    # Which optional modalities ran for the source video: transcription / ocr / audio_events /
+    # vision / tracking / verifier / clip_alignment -> ran | not_run | failed | disabled | no_audio.
+    # ``no_text_detected`` and ``ocr_not_run`` are different things; filter on this, not on empty text.
+    coverage: dict[str, str] = Field(default_factory=dict)
+    # frame | clip | scene | sequence | video: what the text of this record describes
+    annotation_scope: str | None = None
+    # single_shot | multi_shot | not_for_generation: whether the record is a generation target and of what kind
+    generation_target: str | None = None
 
 
 class FrameCaptionRecord(_Curated):
@@ -58,6 +70,8 @@ class FrameCaptionRecord(_Curated):
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
+    annotation_scope: str | None = "frame"
+    generation_target: str | None = "not_for_generation"
 
 
 class ClipCaptionRecord(_Curated):
@@ -71,6 +85,10 @@ class ClipCaptionRecord(_Curated):
     end_time: float
     media_duration: float | None = None  # measured length of the clip file
     exact: bool = True  # the file covers exactly start_time..end_time (within frame_sampling.clip_tolerance_seconds)
+    actual_start: float | None = None  # measured source time of the file's first frame (frame-hash boundary check)
+    actual_end: float | None = None  # measured source time of the file's last frame
+    boundary_error_seconds: float | None = None
+    boundary_check: str = "not_run"  # passed | failed | not_run | error
     fps: float | None = None  # measured on the clip file
     width: int | None = None
     height: int | None = None
@@ -81,14 +99,19 @@ class ClipCaptionRecord(_Curated):
     actions: list[str] = Field(default_factory=list)
     camera: CameraAnnotation | None = None
     subject_motion: SubjectMotion | None = None  # measured subject motion separated from the camera motion
-    transcript: str | None = None
+    transcript: str | None = None  # text of the transcript segments overlapping the clip (may extend past its edges, see transcript_scope)
+    transcript_segments: list[dict[str, Any]] = Field(default_factory=list)  # segments clipped to the window: absolute + clip-relative times, partial flag
+    transcript_scope: str | None = None  # word_clipped | segment_overlap | none | not_run
     frame_ids: list[str] = Field(default_factory=list)
+    claims: list[dict[str, Any]] = Field(default_factory=list)  # claim-level evidence: field, value, source, status, evidence frames
     provider: str | None = None
     confidence: float | None = None
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
     hard_negatives: list[HardNegative] = Field(default_factory=list)  # captions that are wrong for this clip
+    annotation_scope: str | None = "clip"
+    generation_target: str | None = "single_shot"
 
 
 class SceneRecord(_Curated):
@@ -115,16 +138,21 @@ class SceneRecord(_Curated):
     visual_style: VisualStyle
     temporal_progression: str | None = None
     transcript: str | None = None
+    transcript_segments: list[dict[str, Any]] = Field(default_factory=list)
+    transcript_scope: str | None = None
     ocr_text: list[str] = Field(default_factory=list)
     frame_ids: list[str] = Field(default_factory=list)
     clip_id: str | None = None
     measurements: Measurements | None = None
+    claims: list[dict[str, Any]] = Field(default_factory=list)  # claim-level evidence (see validation/claims.py)
     provider: str | None = None
     confidence: float | None = None
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
     hard_negatives: list[HardNegative] = Field(default_factory=list)
+    annotation_scope: str | None = "scene"
+    generation_target: str | None = "single_shot"
 
     @model_validator(mode="before")
     @classmethod
@@ -149,11 +177,16 @@ class EventRecord(_Curated):
     frame_ids: list[str] = Field(default_factory=list)
     clip_ids: list[str] = Field(default_factory=list)
     source: str
+    boundary_precision: str | None = None  # scene | measured | asr | frame | approximate
+    start_uncertainty_ms: float | None = None
+    end_uncertainty_ms: float | None = None
     confidence: float | None = None
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     relations: list[dict[str, Any]] = Field(default_factory=list)  # outgoing relations
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
+    annotation_scope: str | None = "event"
+    generation_target: str | None = "not_for_generation"
 
 
 class SequenceRecord(_Curated):
@@ -184,6 +217,8 @@ class SequenceRecord(_Curated):
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
+    annotation_scope: str | None = "sequence"
+    generation_target: str | None = "multi_shot"
 
 
 class VideoDescriptionRecord(_Curated):
@@ -210,3 +245,5 @@ class VideoDescriptionRecord(_Curated):
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     quality: QualityScore | None = None
     validation: ValidationInfo | None = None
+    annotation_scope: str | None = "video"
+    generation_target: str | None = "multi_shot"

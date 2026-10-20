@@ -86,7 +86,7 @@ def test_reannotate_shard_rewrites_everything_into_the_output_dir(tmp_path: Path
     rows = list(read_jsonl(out / "scenes.jsonl"))
     assert all("start" not in r and r["start_time"] == 10.0 * i and r["record_type"] == "scene" for i, r in enumerate(rows))
     assert all(r["split"] and r["tier"] == "silver" and r["tier_reasons"] == ["overall_below_0.8"] for r in rows)  # overall 0.7: silver, not gold
-    assert all(r["subsets"] == ["cinematic"] for r in rows)  # silver, 8 s, known camera, sharp
+    assert all("cinematic" in r["subsets"] for r in rows)  # silver, 8 s, known camera, sharp
     qa = list(read_jsonl(out / "temporal_qa.jsonl"))
     assert qa[0]["record_id"] == "qa_v_000001" and qa[0]["tier"] == "silver" and qa[1]["tier"] == "bronze" and qa[1]["tier_reasons"] == ["status_review"]
     assert pq.read_table(out / "temporal_qa.parquet").num_rows == 2 and str(pq.read_table(out / "temporal_qa.parquet").schema.field("template_id").type) == "string"

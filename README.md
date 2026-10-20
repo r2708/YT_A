@@ -573,6 +573,37 @@ no language model is involved. Thresholds live in `config/default.yaml` (`qualit
 | Licensing | DOWNLOAD + EXPORT | `license_status` (`creative_commons`, `standard`, `other`, `unknown`) from the source license; `licensing.action: reject` refuses to download videos outside `licensing.allowed`; allowed videos' records get the `licensed` subset |
 | Diversity | `video-dataset diversity`, `statistics.json` | distributions of shot size, camera movement (+ direction, speed), angle, setting, time of day, lighting, colour temperature, exposure, subject motion, transitions, duration, aesthetic score, subjects and quality flags, plus the under-represented categories |
 
+### Acceptance policy, claim evidence and release gates
+
+Validation separates *what was checked* from *what was decided*. Every validator writes named
+checks (`validation.checks`: `true` / `false` / `null` = not applicable, or `not_run` / `error`),
+and the versioned policy in `validation/policy.py` (`validation.policy_version`) turns them into
+`accepted` / `review` / `rejected` with machine-readable `reason_codes`
+(`failed_check:<name>`, `missing_check:<name>`, `semantic_verification:not_run`, `hard:<text>`, ...).
+The policy fails closed: a required check that did not run is a reason for `review`, never a pass.
+
+| Mechanism | Where | What it records |
+|---|---|---|
+| Semantic verification state | VALIDATION | `validation.semantic_verification`: `measured` (detector / flow / pixel statistics), `verifier:<name>`, `human`, or `not_run` (generated text nobody judged -> capped at review, never strict) |
+| Claim-level evidence | VALIDATION -> `claims` on scene / clip records | one entry per atomic claim (`camera.movement`, `subject`, `lighting`, `environment.*`, `action`, `temporal_progression`) with `source` (optical_flow, detector, clip_zero_shot, pixel_statistics, tracker, model), `status` (`supported`, `contradicted`, `not_checked`, `unknown`) and `evidence_frame_ids` |
+| Camera / measurement agreement | VALIDATION | `checks.camera_motion_agreement`: the camera label family vs the optical-flow family (`not_applicable` when either is unknown); disagreement -> review |
+| Clip boundary verification | FRAME_EXTRACTION (`frame_sampling.verify_clip_boundaries`) | the clip's first / last frames are decoded and located in the source by perceptual hash: `actual_start`, `actual_end`, `boundary_error_seconds`, `boundary_check` (`passed` / `failed` / `error` / `not_run`); VALIDATION check `clip_boundaries`. `start_time` / `end_time` are the *requested* half-open interval |
+| Single-shot guard | VALIDATION | `checks.single_shot`: a content change >= `validation.max_in_shot_change` inside one shot -> `generation_target: not_for_generation` + review (possible missed cut). `annotation_scope` / `generation_target` on every record |
+| Text structure | VALIDATION (`validation.text_checks`, spaCy when available) | `checks.text_consistent` (one text claiming two incompatible camera movements), QA `question_form` and `answer_type` (`answer_type` on every QA record) |
+| Answer recomputation | VALIDATION (`validation.recompute_answers`) | `checks.answer_recomputed`: duration / localization / ordering / count answers are re-derived from the evidence events alone; disagreement rejects |
+| Relation semantics | VALIDATION (`validation.relation_checks`) | `checks.interval_semantics` for every relation type, `checks.acyclic` on the BEFORE graph; `evidence_kind` (`measured` / `model_inferred` / `human`) on relations - model-inferred CAUSES never passes without review |
+| Event timing | TEMPORAL | `boundary_precision` + `start_uncertainty_ms` / `end_uncertainty_ms` on every event (a shot-inherited boundary is uncertain by the whole shot); tracked subject motion times actions inside the shot (`measured`) |
+| Transcript windows | EXPORT | `transcript_segments` on scene / clip records: absolute `start` / `end` and window-relative `rel_start` / `rel_end`, word-clipped text when word timestamps exist, `partial` flag, `transcript_scope` (`word_clipped` / `segment_overlap` / `none` / `not_run`); `speaker_visible` is always `null` (never inferred) |
+| Coverage | EXPORT | `coverage` on every record and in the manifests: `transcription` / `ocr` / `audio_events` / `vision` / `tracking` / `verifier` / `clip_alignment` / `text_checks` / `clip_boundaries` -> `ran` / `not_run` / `failed` / `disabled` / `no_audio`; `Transcript.status` tells `no_audio` from `not_run` |
+| Technical quality | PREPROCESS + VALIDATION | new flags `frozen`, `low_fps`, `extreme_aspect_ratio`, `frame_count_mismatch` next to the existing ones; `quality.policy_version` names the threshold set |
+| Groups, bands, rights | EXPORT | `source_group_id` (near-duplicate cluster = split unit), `duration_<band>` subsets (`export.duration_bands`), `rights_<status>` subsets from `rights_status` (`declared_cc_by` / `restricted` / `unknown` / `removed`), `export.require_rights` |
+| Strict subset | EXPORT | `subsets: ["strict"]` + `final/strict/`: accepted records whose required checks all passed, semantic verification present, single-shot generation targets, no near-duplicate videos (`export.strict`) |
+| Media manifest | EXPORT | `final/media_manifest.jsonl`: one row per referenced frame / clip with `exists`, `size_bytes`, optional `sha256` (`export.hash_media`); `statistics.json["media_references"]` |
+| Provenance / reproducibility | EXPORT | `final/provenance.jsonl` (url, platform id, channel, retrieval time, license, rights, source sha256, canonical id, coverage) and `environment` in every manifest (code commit, python, platform, ffmpeg, package versions, model identifiers, per-section config hashes; no secrets). `pipeline.rerun_on_config_change` re-runs stages whose config changed |
+| Release gates | `video-dataset release-check`, before every upload (`upload.release_gate`) | schema + timestamp invariants, cross-record references, JSONL == Parquet ids, split leakage (per video and per `source_group_id`), media references (required when `upload.include_media`), strict subset; `final/release_report.json` also carries status / reason-code / coverage / claim / boundary / rights distributions |
+| Human review loop | `video-dataset review-queue`, `calibrate` | `final/review_queue.jsonl` (records needing a human, with evidence); labels in `final/reviews/labels.jsonl` are applied at the next export (`semantic_verification: human`) and feed `calibrate`, which reports accuracy / Brier / ECE / false-accept per `confidence_source` and recommends per-source thresholds (`final/calibration.json`) |
+| Takedown | `video-dataset remove-source VIDEO_ID` | removes working files, per-video export, records in `final/` and archived shards, forgets the state and writes a tombstone (`final/removed_sources.json`) so the source is never re-exported; Hub shards are listed for manual deletion |
+
 ### Scene record (`scenes.jsonl`)
 
 ```json

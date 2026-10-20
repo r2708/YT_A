@@ -83,10 +83,109 @@ def compute_statistics(
         "records_by_tier": {name: _field_counts(recs, "tier") for name, recs in records.items()},
         "records_with_hard_negatives": {name: sum(1 for r in recs if isinstance(r, dict) and r.get("hard_negatives")) for name, recs in records.items() if name in ("scenes", "clips", "temporal_qa", "long_video_qa")},
         "records_in_cinematic_subset": {name: sum(1 for r in recs if isinstance(r, dict) and "cinematic" in (r.get("subsets") or [])) for name, recs in records.items()},
+        "records_in_strict_subset": {name: sum(1 for r in recs if isinstance(r, dict) and "strict" in (r.get("subsets") or [])) for name, recs in records.items()},
+        "hard_negatives": _negative_stats(records),
+        "reason_codes": {name: _reason_codes(recs) for name, recs in records.items()},
+        "confidence_by_source": _confidence_by_source(records),
+        "duration_by_type": {name: _duration_dist(recs) for name, recs in records.items() if name in ("scenes", "clips", "sequences", "events")},
+        "generation_targets": _field_counts([r for n in ("scenes", "clips", "sequences") for r in records.get(n, [])], "generation_target"),
+        "clip_boundary_checks": _field_counts(records.get("clips", []), "boundary_check"),
+        "event_boundary_precision": _field_counts(records.get("events", []), "boundary_precision"),
+        "transcript_scope": _field_counts(records.get("clips", []), "transcript_scope"),
+        "coverage": _coverage(validated_summaries, records),
+        "calibration": {"status": "uncalibrated", "note": "confidence values are instrument scores (flow consistency, detector probability, ASR log-prob, OCR score); run `video-dataset calibrate` with human labels to measure them"},
     }
     if extra:
         stats.update(extra)
     return stats
+
+
+def _negative_stats(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    positives = 0
+    negatives = 0
+    by_kind: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    for name in ("scenes", "clips", "temporal_qa", "long_video_qa"):
+        for r in records.get(name, []):
+            if not isinstance(r, dict):
+                continue
+            positives += 1
+            for neg in r.get("hard_negatives") or []:
+                negatives += 1
+                by_kind[str(neg.get("kind"))] = by_kind.get(str(neg.get("kind")), 0) + 1
+                by_status[str(neg.get("verification_status") or "unknown")] = by_status.get(str(neg.get("verification_status") or "unknown"), 0) + 1
+    return {"positive_records": positives, "negative_texts": negatives, "by_kind": by_kind, "by_verification_status": by_status}
+
+
+def _reason_codes(records: Iterable[dict[str, Any]]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for r in records:
+        for code in ((r.get("validation") or {}).get("reason_codes") or []) if isinstance(r, dict) else []:
+            key = str(code).split(" ")[0][:60]
+            out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1])[:40])
+
+
+def _confidence_by_source(records: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+    """Per confidence_source: count and a 10-bin histogram. Scores of different sources are not
+    comparable, so they are never pooled."""
+    by: dict[str, list[float]] = {}
+    missing: dict[str, int] = {}
+    for rows in records.values():
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            src = str(r.get("confidence_source") or "unavailable")
+            c = r.get("confidence")
+            if c is None:
+                missing[src] = missing.get(src, 0) + 1
+                continue
+            by.setdefault(src, []).append(float(c))
+    out: dict[str, dict[str, Any]] = {}
+    for src, vals in by.items():
+        hist = [0] * 10
+        for v in vals:
+            hist[min(9, max(0, int(v * 10)))] += 1
+        out[src] = {"count": len(vals), "mean": round(sum(vals) / len(vals), 4), "histogram": hist, "missing": missing.get(src, 0)}
+    for src, n in missing.items():
+        out.setdefault(src, {"count": 0, "mean": None, "histogram": [0] * 10, "missing": n})
+    return out
+
+
+def _duration_dist(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    vals: list[float] = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        d = r.get("duration")
+        if d is None and r.get("start_time") is not None and r.get("end_time") is not None:
+            d = float(r["end_time"]) - float(r["start_time"])
+        if d is not None:
+            vals.append(float(d))
+    if not vals:
+        return {"count": 0}
+    vals.sort()
+    q = lambda f: vals[min(len(vals) - 1, int(f * len(vals)))]  # noqa: E731
+    return {"count": len(vals), "min": round(vals[0], 3), "p25": round(q(0.25), 3), "median": round(q(0.5), 3), "p75": round(q(0.75), 3), "max": round(vals[-1], 3), "mean": round(sum(vals) / len(vals), 3), "bands": _dist(_bucket(v, _DURATION_BUCKETS) for v in vals)}
+
+
+def _coverage(summaries: list[dict[str, Any]], records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Modality coverage over records (from the per-record coverage block) and claim totals."""
+    out: dict[str, dict[str, int]] = {}
+    seen_videos: dict[str, dict[str, str]] = {}
+    for rows in records.values():
+        for r in rows:
+            cov = r.get("coverage") if isinstance(r, dict) else None
+            if isinstance(cov, dict) and r.get("video_id"):
+                seen_videos[str(r["video_id"])] = {k: str(v) for k, v in cov.items()}
+    for cov in seen_videos.values():
+        for k, v in cov.items():
+            out.setdefault(k, {})[v.split(":")[0]] = out.setdefault(k, {}).get(v.split(":")[0], 0) + 1
+    claims = {"supported": 0, "contradicted": 0, "not_checked": 0, "unknown": 0}
+    for s in summaries:
+        for k, v in ((s.get("claims") or {}) if isinstance(s, dict) else {}).items():
+            claims[k] = claims.get(k, 0) + int(v)
+    return {"videos": len(seen_videos), "by_modality": out, "claims": claims}
 
 
 def _count_by(rows: list[dict[str, Any]], key: str) -> dict[str, int]:

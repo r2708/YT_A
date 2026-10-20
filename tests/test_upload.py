@@ -70,7 +70,7 @@ def _fake_final(cfg, videos: list[str], rows_per_video: int = 3, media: bool = T
 
 
 def _cfg(tmp_path: Path, **over):
-    base = {"project.data_dir": str(tmp_path / "data"), "project.log_level": "ERROR", "upload.provider": "huggingface", "upload.repo_id": "u/d", "upload.threshold_mb": "0.001", "upload.after_upload": "archive"}
+    base = {"project.data_dir": str(tmp_path / "data"), "project.log_level": "ERROR", "upload.provider": "huggingface", "upload.repo_id": "u/d", "upload.threshold_mb": "0.001", "upload.after_upload": "archive", "upload.release_gate": "false"}  # the fake final/ is not a valid dataset; the gate has its own test
     base.update(over)
     return load_config(None, base)
 

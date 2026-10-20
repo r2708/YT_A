@@ -20,6 +20,7 @@ from video_dataset.schemas.transcript import Transcript
 from video_dataset.schemas.vision import SceneAnalysis
 from video_dataset.temporal.timeline import describable
 from video_dataset.utils.ids import qa_id as make_qa_id
+from video_dataset.validation.text_checks import answer_type_for
 from video_dataset.utils.text import (
     approx_duration_phrase,
     approx_timestamp_phrase,
@@ -114,6 +115,7 @@ def candidate_record(video_id: str, n: int, c: Candidate, duration: float, timel
         confidence_source=src,
         generator=generator_name,
         template_id=c.template_id,
+        answer_type=answer_type_for(str(c.type), c.template_id),
         options=c.options,
         is_long_range=c.long_range,
     )

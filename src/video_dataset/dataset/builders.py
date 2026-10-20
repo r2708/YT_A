@@ -23,11 +23,24 @@ from video_dataset.schemas.scene import Clip, Frame, Scene
 from video_dataset.schemas.transcript import Transcript
 from video_dataset.schemas.validated import ValidatedVideo
 from video_dataset.schemas.vision import CameraMovement, SceneAnalysis, ShotType
+from video_dataset.transcription.align import segments_in_window, window_text
 from video_dataset.utils.ids import record_id
 from video_dataset.utils.text import lower_first, sentence
 from video_dataset.vision.motion import MOVEMENT_PHRASES
 
 _EXPORTABLE = {ValidationStatus.ACCEPTED, ValidationStatus.REVIEW}
+
+
+def generation_target_for(v: ValidationInfo | None) -> str:
+    """single_shot unless the validator suspects a missed cut inside the shot."""
+    if v is not None and v.checks.get("single_shot") is False:
+        return "not_for_generation"
+    return "single_shot"
+
+
+def _claims(a: SceneAnalysis) -> list[dict[str, Any]]:
+    claims = a.enrichments.get("claims") if isinstance(a.enrichments, dict) else None
+    return list(claims) if isinstance(claims, list) else []
 
 
 def _rel(path: str | None, base: Path | None) -> str | None:
@@ -145,6 +158,7 @@ class DatasetBuilder:
                 desc += " " + sentence(a.temporal_progression)
             if c.duration < (a.end_time - a.start_time) - 0.5:
                 desc += f" (This clip covers {c.start_time:.1f}s to {c.end_time:.1f}s of the shot.)"
+            segments, scope = segments_in_window(transcript, c.start_time, c.end_time)
             out.append(
                 ClipCaptionRecord(
                     record_id=record_id("clip", validated.video_id, c.clip_id),
@@ -156,6 +170,10 @@ class DatasetBuilder:
                     end_time=c.end_time,
                     media_duration=c.media_duration,
                     exact=c.exact,
+                    actual_start=c.actual_start,
+                    actual_end=c.actual_end,
+                    boundary_error_seconds=c.boundary_error_seconds,
+                    boundary_check=c.boundary_check,
                     fps=c.fps,
                     width=c.width,
                     height=c.height,
@@ -164,14 +182,18 @@ class DatasetBuilder:
                     actions=a.actions,
                     camera=a.camera,
                     subject_motion=a.subject_motion,
-                    transcript=(transcript.text_between(c.start_time, c.end_time) or None) if transcript else None,
+                    transcript=window_text(segments) if segments else ((transcript.text_between(c.start_time, c.end_time) or None) if transcript else None),
+                    transcript_segments=segments,
+                    transcript_scope=scope,
                     frame_ids=c.frame_ids,
+                    claims=_claims(a),
                     provider=a.provider,
                     confidence=a.confidence,
                     confidence_source=ConfidenceSource(a.confidence_source),
                     quality=vs.quality,
                     validation=vs.validation,
                     hard_negatives=self._caption_negatives(a, kept),
+                    generation_target=generation_target_for(vs.validation),
                 )
             )
         return out
@@ -186,6 +208,7 @@ class DatasetBuilder:
                 continue
             a = vs.analysis
             sc = scene_by_id.get(a.scene_id)
+            segments, scope = segments_in_window(transcript, a.start_time, a.end_time)
             out.append(
                 SceneRecord(
                     record_id=record_id("scene", validated.video_id, a.scene_id),
@@ -206,17 +229,21 @@ class DatasetBuilder:
                     subject_motion=a.subject_motion,
                     visual_style=a.visual_style,
                     temporal_progression=a.temporal_progression,
-                    transcript=(transcript.text_between(a.start_time, a.end_time) or None) if transcript else None,
+                    transcript=window_text(segments) if segments else ((transcript.text_between(a.start_time, a.end_time) or None) if transcript else None),
+                    transcript_segments=segments,
+                    transcript_scope=scope,
                     ocr_text=[t.text for t in ocr.tracks if a.scene_id in t.scene_ids] if ocr else [],
                     frame_ids=a.frame_ids,
                     clip_id=clip_by_scene[a.scene_id].clip_id if a.scene_id in clip_by_scene else None,
                     measurements=a.measurements,
+                    claims=_claims(a),
                     provider=a.provider,
                     confidence=a.confidence,
                     confidence_source=ConfidenceSource(a.confidence_source),
                     quality=vs.quality,
                     validation=vs.validation,
                     hard_negatives=self._caption_negatives(a, kept),
+                    generation_target=generation_target_for(vs.validation),
                 )
             )
         return out
@@ -228,7 +255,7 @@ class DatasetBuilder:
             if not self._keep(vr.validation):
                 continue
             r = vr.relation
-            rel_by_event.setdefault(r.event_a, []).append({"relation": str(r.relation), "event_b": r.event_b, "event_b_text": r.event_b_text, "gap_seconds": r.gap_seconds, "confidence": r.confidence, "relation_id": r.relation_id})
+            rel_by_event.setdefault(r.event_a, []).append({"relation": str(r.relation), "event_b": r.event_b, "event_b_text": r.event_b_text, "gap_seconds": r.gap_seconds, "confidence": r.confidence, "relation_id": r.relation_id, "derivation": r.derivation, "evidence_kind": r.evidence_kind, "validation_status": str(vr.validation.status)})
         for ve in validated.events:
             if not self._keep(ve.validation):
                 continue
@@ -248,6 +275,9 @@ class DatasetBuilder:
                     frame_ids=e.frame_ids,
                     clip_ids=e.clip_ids,
                     source=str(e.source),
+                    boundary_precision=e.boundary_precision,
+                    start_uncertainty_ms=e.start_uncertainty_ms,
+                    end_uncertainty_ms=e.end_uncertainty_ms,
                     confidence=e.confidence,
                     confidence_source=ConfidenceSource(e.confidence_source),
                     relations=rel_by_event.get(e.event_id, []),
@@ -379,8 +409,11 @@ class DatasetBuilder:
         if trans_text:
             prompt_parts.append(f"Transitions: {trans_text}.")
         conf = round(min(c for c in confs if c is not None), 3) if confs and all(c is not None for c in confs) else None
-        statuses = [vs.validation.status for vs in kept if vs.analysis.scene_id in {s.scene_id for s in group}]
+        members = [vs for vs in kept if vs.analysis.scene_id in {s.scene_id for s in group}]
+        statuses = [vs.validation.status for vs in members]
         status = ValidationStatus.REVIEW if any(st == ValidationStatus.REVIEW for st in statuses) else ValidationStatus.ACCEPTED
+        policies = {vs.validation.policy_version for vs in members}
+        semantics = {vs.validation.semantic_verification for vs in members}
         return VideoDescriptionRecord(
             record_id=record_id("videodesc", validated.video_id, f"{gi:02d}"),
             video_id=validated.video_id,
@@ -401,5 +434,10 @@ class DatasetBuilder:
             confidence=conf,
             confidence_source=ConfidenceSource.DERIVED_MIN if conf is not None else ConfidenceSource.UNAVAILABLE,
             quality=QualityScore.from_components(grounding=conf, description_quality=None),
-            validation=ValidationInfo(status=status, issues=[] if status == ValidationStatus.ACCEPTED else ["contains scenes flagged for review"]),
+            validation=ValidationInfo(
+                status=status, issues=[] if status == ValidationStatus.ACCEPTED else ["contains scenes flagged for review"],
+                policy_version=policies.pop() if len(policies) == 1 else None,
+                semantic_verification=semantics.pop() if len(semantics) == 1 else None,
+                reason_codes=[] if status == ValidationStatus.ACCEPTED else ["scenes_in_review"],
+            ),
         )

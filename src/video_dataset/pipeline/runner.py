@@ -149,6 +149,7 @@ class PipelineRunner:
                     f"before starting a new run. A stale {self.lock.path.name} from a dead process is ignored automatically."
                 )
         self.stages = [Stage(s) for s in config.pipeline.stages]
+        self._config_drift: set[str] = set()  # videos whose downstream stages were invalidated by a config change
 
     # ------------------------------------------------------------------ registration
     def register_inputs(self, items: list[InputItem]) -> list[tuple[str, InputItem]]:
@@ -191,10 +192,16 @@ class PipelineRunner:
         config_hash = ctx.config_hash(*STAGE_CONFIG_SECTIONS.get(stage, ()))
         if rec and rec.status == StageStatus.DONE and not force:
             if rec.config_hash and rec.config_hash != config_hash:
-                log.info(stage_line(label, ctx.video_id, "cached (note: config changed since; use --force-from to redo)", ok=True))
+                if bool(getattr(self.config.pipeline, "rerun_on_config_change", False)):
+                    log.info(stage_line(label, ctx.video_id, "config changed since this stage ran; re-running it and every stage after it", ok=None))
+                    self.db.reset_stages(ctx.video_id, stage)
+                    self._config_drift.add(ctx.video_id)
+                else:
+                    log.info(stage_line(label, ctx.video_id, "cached (note: config changed since; use --force-from to redo)", ok=True))
+                    return StageStatus.DONE, False
             else:
                 log.info(stage_line(label, ctx.video_id, "cached", ok=True))
-            return StageStatus.DONE, False
+                return StageStatus.DONE, False
         if rec and rec.status == StageStatus.SKIPPED and not force:
             log.info(stage_line(label, ctx.video_id, "skipped (disabled)", ok=None))
             return StageStatus.SKIPPED, False

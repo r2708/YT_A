@@ -36,3 +36,9 @@ class HardNegative(BaseSchema):
     kind: str  # swapped_order | shifted_time | wrong_duration | other_shot | attribute_swap | other_event
     source_ids: list[str] = Field(default_factory=list)  # scene / event ids the negative was built from
     note: str | None = None  # the measured difference that makes it a negative, e.g. "camera pan_left vs static"
+    # measured_difference: the rule swapped / borrowed a value that was *measured* to differ (camera
+    # flow, lighting level, timestamps), so the text is wrong by construction; rule_derived: the
+    # structure guarantees it is wrong (order reversed, time shifted beyond tolerance); unverified:
+    # a borrowed text that merely differs (e.g. another shot's caption that lists other objects)
+    verification_status: str = "rule_derived"
+    evidence_interval: list[float] = Field(default_factory=list)  # [start, end] of the positive record the negative contrasts with

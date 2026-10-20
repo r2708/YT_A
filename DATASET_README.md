@@ -285,6 +285,14 @@ All records include:
 - **`generation_prompt` + `prompt_variants`** on scene, clip and sequence records - built from the structured fields only; the variants are template / synonym rewrites of the same facts
 - **`subsets`** - `cinematic`, and `licensed` for videos whose source license is Creative Commons (`license_status` in `manifest.json`)
 
+- **`validation.checks` / `reason_codes` / `policy_version` / `semantic_verification`** - every check is `passed`, `failed`, `not_applicable`, `not_run` or `error`; the versioned policy fails closed (a required check that did not run means `review`, never `accepted`)
+- **`claims`** on scene / clip records - each atomic claim with its `source` (optical flow, detector, CLIP zero-shot, pixel statistics, tracker) and `status` (`supported`, `contradicted`, `not_checked`, `unknown`) plus `evidence_frame_ids`
+- **Clip boundaries** - `start_time` / `end_time` are the requested half-open interval; `actual_start` / `actual_end` / `boundary_error_seconds` / `boundary_check` are measured by matching the clip's first and last frames against the source
+- **`transcript_segments` / `transcript_scope`** - transcript text clipped to the record's window with absolute and relative times; `coverage` says whether ASR / OCR / audio events / tracking actually ran
+- **Events** - `boundary_precision` with `start_uncertainty_ms` / `end_uncertainty_ms`; relations carry `evidence_kind`
+- **`source_group_id`**, `schema_version`, `annotation_scope`, `generation_target` on every record; the `strict` subset (and `strict/` folder) holds only records whose required checks all passed
+- **`provenance.jsonl`, `media_manifest.jsonl`, `release_report.json`** in every shard - source rights (`rights_status`), referenced-media integrity and the release gates the shard passed
+
 Questions are generated from timeline events (not hallucinated), ensuring high-quality, verifiable question-answer pairs.
 
 ## 🏗️ Data Generation Pipeline

@@ -132,6 +132,13 @@ class FrameSamplingConfig(_Section):
     target_height: int | None = None  # e.g. 480; with target_width the aspect_mode decides how to fit
     target_width: int | None = None  # e.g. 854
     aspect_mode: str = "scale"  # scale (fit inside, keep aspect) | pad (letterbox to exactly WxH) | crop (centre-crop to exactly WxH)
+    # Boundary verification: decode the clip's first / last frames and match them against source
+    # frames around the requested boundaries (perceptual hash) to measure where the clip really
+    # starts and ends. copy: only stream-copied (keyframe-aligned) clips and clips of unknown origin;
+    # all: every clip; none: skip. Results land in Clip.actual_start / actual_end / boundary_check.
+    verify_clip_boundaries: str = "copy"
+    boundary_search_seconds: float = 1.0  # source window searched on each side of a boundary
+    boundary_max_hamming: int = 14  # dHash distance above which no source frame counts as a match (-> error)
 
 
 class TranscriptionConfig(_Section):
@@ -307,6 +314,16 @@ class ValidationConfig(_Section):
     clip_alignment_max_frames: int = 3
     frame_sequence_checks: bool = True  # frames of a scene must be ordered, inside the scene, without large gaps
     clip_checks: bool = True  # clip files must exist and match the scene span
+    # Text-structure checks (captions: internal contradictions; QA: question form + answer type).
+    # nlp_model: a spaCy pipeline for verb detection ("auto" = qa.spacy_model, null = rules only).
+    text_checks: bool = True
+    nlp_model: str | None = "auto"
+    recompute_answers: bool = True  # re-derive numeric / ordering answers from the evidence events and compare
+    relation_checks: bool = True  # every relation must satisfy its interval semantics; BEFORE graph must be acyclic
+    claims: bool = True  # attach claim-level evidence (field, value, source, status, frames) to scene records
+    # A shot whose scan shows a visual change at least this large (0..1) may hide a missed cut: the
+    # record is marked generation_target=not_for_generation and sent to review.
+    max_in_shot_change: float = 0.6
 
 
 class QualityConfig(_Section):
@@ -321,6 +338,13 @@ class QualityConfig(_Section):
     max_blockiness: float = 0.35  # 8x8 block-boundary ratio above this -> compression artifacts (0 disables)
     reject_flagged: bool = False  # true: flagged shots are rejected; false: review + tier capped at bronze
     duration_tolerance_seconds: float = 1.0  # metadata duration vs probed duration mismatch
+    min_fps: float = 10.0  # source frame rate below this -> low_fps (0 disables)
+    max_aspect_ratio: float = 3.0  # width/height (or its inverse) above this -> extreme_aspect_ratio (0 disables)
+    # A shot longer than frozen_min_duration whose scan never changes more than frozen_max_change
+    # (0..1 content change) and shows no motion -> frozen (a still image / stalled stream)
+    frozen_max_change: float = 0.004
+    frozen_min_duration: float = 2.0
+    policy_version: str = "quality-2026.10"  # recorded with the flags so thresholds are traceable
 
 
 class LicensingConfig(_Section):
@@ -330,6 +354,10 @@ class LicensingConfig(_Section):
     allowed: list[str] = Field(default_factory=lambda: ["creative_commons"])  # statuses that count as licensed for reuse
     action: str = "flag"  # flag: record + subset only | reject: do not download videos outside `allowed`
     subset: bool = True  # add the "licensed" subset to every record of an allowed video
+    # rights_status values that a release requiring verified rights may contain. The platform's
+    # declared license is evidence, not proof: `declared_cc_by` means YouTube reported a CC-BY
+    # license; `restricted` the standard license; `unknown` nothing usable; `removed` a takedown.
+    release_rights: list[str] = Field(default_factory=lambda: ["declared_cc_by"])
 
 
 class DeduplicationConfig(_Section):
@@ -393,6 +421,15 @@ class SequenceConfig(_Section):
     allow_fades: bool = False  # a fade / dissolve ends a sequence unless true
 
 
+class StrictConfig(_Section):
+    """The strict training release: records whose required checks all passed. Written as the
+    ``strict`` subset (and ``final/strict/`` files) so a training job never has to hand-filter."""
+
+    enabled: bool = True
+    write_files: bool = True
+    generation_targets: list[str] = Field(default_factory=lambda: ["single_shot", "multi_shot"])  # what scene / clip / sequence records may be
+
+
 class ExportConfig(_Section):
     formats: list[str] = Field(default_factory=lambda: ["jsonl", "parquet"])
     include_review: bool = True
@@ -413,6 +450,12 @@ class ExportConfig(_Section):
     sequences: SequenceConfig = Field(default_factory=SequenceConfig)
     prompt_variants: int = 3  # template / synonym rewrites of generation_prompt per scene, clip and sequence (0 disables)
     exclude_duplicate_videos: bool = False  # true: records of near-duplicate videos are left out of final/ (false: kept, bronze, same split as the canonical video)
+    strict: StrictConfig = Field(default_factory=StrictConfig)
+    # Duration bands: every scene / clip / sequence record joins the subset "duration_<band>" its length falls in
+    duration_bands: dict[str, list[float]] = Field(default_factory=lambda: {"short": [0.0, 3.0], "medium": [3.0, 10.0], "long": [10.0, 1e9]})
+    media_manifest: bool = True  # write final/media_manifest.jsonl (one row per referenced asset with existence + size)
+    hash_media: bool = False  # also sha256 every referenced asset (slow on large sets)
+    require_rights: bool = False  # true: only videos whose rights_status is in licensing.release_rights are exported
 
 
 class UploadConfig(_Section):
@@ -428,6 +471,9 @@ class UploadConfig(_Section):
     path_in_repo: str = ""  # optional prefix inside the repo, e.g. "v1"
     after_upload: str = "archive"  # archive (move to final/uploaded/shard_NNNN, keeps a local copy) | delete (free disk)
     retries: int = 3
+    # Run the release gates (schema, record ids JSONL == Parquet, split leakage, and - with
+    # include_media - media references) before every upload; a failing gate aborts the upload.
+    release_gate: bool = True
 
 
 class CleanupConfig(_Section):
@@ -467,6 +513,9 @@ class PipelineStagesConfig(_Section):
     stage_workers: int = 0  # threads inside a stage (clips, frames, OCR, vision, verification); 0 = auto (min(4, cores))
     model_stages_sequential: bool = True
     stage_timeout_seconds: int | None = None
+    # A DONE stage whose config section changed since it ran is re-executed (with everything after
+    # it) instead of being reused with a note in the log.
+    rerun_on_config_change: bool = False
 
 
 class PipelineConfig(BaseModel):

@@ -53,6 +53,15 @@ def preprocess_stage(ctx: VideoContext) -> StageOutput:
         flags.append("low_resolution")
     if float(qcfg.min_bitrate_kbps) > 0 and src_info.bitrate and src_info.bitrate / 1000.0 < float(qcfg.min_bitrate_kbps):
         flags.append("low_bitrate")
+    if float(getattr(qcfg, "min_fps", 0) or 0) > 0 and src_info.fps and src_info.fps < float(qcfg.min_fps):
+        flags.append("low_fps")
+    max_ar = float(getattr(qcfg, "max_aspect_ratio", 0) or 0)
+    if max_ar > 0 and src_info.width and src_info.height:
+        ar = src_info.width / float(src_info.height)
+        if ar > max_ar or ar < 1.0 / max_ar:
+            flags.append("extreme_aspect_ratio")
+    if info.frame_count and info.duration and info.fps and abs(info.frame_count - info.duration * info.fps) > max(2.0, 0.02 * info.frame_count) + info.fps:
+        flags.append("frame_count_mismatch")  # container says N frames, duration * fps says otherwise: truncated / VFR stream
     info = info.model_copy(update={"metadata_duration": meta_duration, "duration_mismatch_seconds": mismatch, "quality_flags": flags})
     if flags:
         log.info("source quality flags: %s", ", ".join(flags))

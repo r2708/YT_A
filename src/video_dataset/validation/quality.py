@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from video_dataset.config import QualityConfig
 from video_dataset.schemas.common import ConfidenceSource
@@ -11,10 +12,28 @@ from video_dataset.schemas.qa import QARecord
 from video_dataset.schemas.quality import QualityScore
 from video_dataset.schemas.vision import Measurements, SceneAnalysis, VerificationVerdict
 
+VIDEO_LEVEL_FLAGS = ("low_resolution", "low_bitrate", "low_fps", "extreme_aspect_ratio", "duration_mismatch")
 
-def scene_quality_flags(m: Measurements | None, video_flags: list[str] | None, cfg: QualityConfig) -> list[str]:
-    """Measured visual-quality flags of one shot: its own frame statistics plus the source video's
-    flags (resolution / bitrate). Order is stable so records compare cleanly."""
+
+def frozen_shot(scan: Any, duration: float, cfg: QualityConfig) -> bool:
+    """A shot of at least ``frozen_min_duration`` seconds whose scan never registers a content change
+    above ``frozen_max_change`` and no measurable motion: a still image or a stalled stream."""
+    if scan is None or not getattr(scan, "samples", None) or duration < float(cfg.frozen_min_duration):
+        return False
+    samples = list(scan.samples)[1:] or list(scan.samples)
+    if len(samples) < 3:
+        return False
+    max_change = max(float(s.change or 0.0) for s in samples)
+    mags = [float(s.flow_mag) for s in samples if s.flow_mag is not None]
+    still = (max(mags) < 0.05) if mags else True
+    return max_change <= float(cfg.frozen_max_change) and still
+
+
+def scene_quality_flags(m: Measurements | None, video_flags: list[str] | None, cfg: QualityConfig, scan: Any = None, duration: float | None = None) -> list[str]:
+    """Measured visual-quality flags of one shot: its own frame statistics (+ its scan: frozen) plus
+    the source video's flags (resolution / bitrate / frame rate / aspect). Order is stable so
+    records compare cleanly. Each flag maps to one named threshold in ``quality`` config
+    (``policy_version`` records which)."""
     flags: list[str] = []
     if m is not None:
         if float(cfg.min_sharpness) > 0 and m.sharpness is not None and m.sharpness < float(cfg.min_sharpness):
@@ -25,8 +44,10 @@ def scene_quality_flags(m: Measurements | None, video_flags: list[str] | None, c
             flags.append("overexposed")
         if float(cfg.max_blockiness) > 0 and m.blockiness is not None and m.blockiness > float(cfg.max_blockiness):
             flags.append("compression_artifacts")
+    if scan is not None and duration is not None and frozen_shot(scan, duration, cfg):
+        flags.append("frozen")
     for f in video_flags or []:
-        if f in ("low_resolution", "low_bitrate") and f not in flags:
+        if f in VIDEO_LEVEL_FLAGS and f != "duration_mismatch" and f not in flags:
             flags.append(f)
     return flags
 

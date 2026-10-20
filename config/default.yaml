@@ -83,6 +83,10 @@ frame_sampling:
   target_height: null      # e.g. 480
   target_width: null       # e.g. 854 (with target_height; aspect_mode decides how the source is fitted)
   aspect_mode: scale       # scale (fit inside, keep aspect) | pad (letterbox to WxH) | crop (centre-crop to WxH)
+  verify_clip_boundaries: copy  # copy (stream-copied / unknown-origin clips) | all | none - decode the clip's first and
+                                # last frames and locate them in the source (perceptual hash) -> actual_start / actual_end
+  boundary_search_seconds: 1.0  # source window searched around each requested boundary
+  boundary_max_hamming: 14      # no source frame within this dHash distance -> boundary_check: error (never a guess)
 
 transcription:
   enabled: true
@@ -229,6 +233,12 @@ validation:
   clip_alignment_max_frames: 3
   frame_sequence_checks: true  # frames ordered, inside the shot, no large gaps
   clip_checks: true        # clip files exist and match the shot span
+  text_checks: true        # captions: no internal contradictions; QA: question form + answer type match
+  nlp_model: auto          # spaCy pipeline for the text checks (auto = qa.spacy_model, null = rules only)
+  recompute_answers: true  # numeric / ordering answers are re-derived from the evidence events and compared
+  relation_checks: true    # relations must satisfy their interval semantics; the BEFORE graph must be acyclic
+  claims: true             # claim-level evidence (field, value, source, status, frames) on scene / clip records
+  max_in_shot_change: 0.6  # a visual change this large inside one shot = possible missed cut -> not_for_generation + review
 
 quality:                   # visual-quality flags (measured); flagged shots -> review (or rejected), never gold
   min_height: 480          # source height below this -> low_resolution
@@ -239,11 +249,17 @@ quality:                   # visual-quality flags (measured); flagged shots -> r
   max_blockiness: 0.35     # 8x8 block-boundary ratio above this -> compression_artifacts (0 disables)
   reject_flagged: false    # true: reject flagged shots instead of review
   duration_tolerance_seconds: 1.0  # yt-dlp duration vs probed duration mismatch -> duration_mismatch flag
+  min_fps: 10              # source frame rate below this -> low_fps (0 disables)
+  max_aspect_ratio: 3.0    # width/height (or inverse) above this -> extreme_aspect_ratio (0 disables)
+  frozen_max_change: 0.004 # shot never changes more than this (0..1) and shows no motion -> frozen
+  frozen_min_duration: 2.0 # ... when it is at least this long
+  policy_version: quality-2026.10
 
 licensing:
   allowed: [creative_commons]  # license_status values that count as licensed for reuse
   action: flag             # flag: record license_status + "licensed" subset | reject: skip downloading other videos
   subset: true
+  release_rights: [declared_cc_by]  # rights_status values allowed in a release that requires verified rights
 
 deduplication:
   enabled: true
@@ -298,6 +314,17 @@ export:
     allow_fades: false
   prompt_variants: 3       # template + synonym rewrites of each generation_prompt (0 disables)
   exclude_duplicate_videos: false  # true: drop records of near-duplicate videos from final/
+  strict:                  # subsets: [strict] + final/strict/: accepted records whose required checks all passed
+    enabled: true
+    write_files: true
+    generation_targets: [single_shot, multi_shot]
+  duration_bands:          # scene / clip / sequence records join the subset "duration_<band>" they fall in
+    short: [0, 3]
+    medium: [3, 10]
+    long: [10, 1.0e9]
+  media_manifest: true     # final/media_manifest.jsonl: one row per referenced frame / clip with existence + size
+  hash_media: false        # also sha256 every referenced asset (slow)
+  require_rights: false    # true: only videos whose rights_status is in licensing.release_rights are exported
 
 upload:
   provider: huggingface    # none | huggingface - upload final/ automatically once it reaches threshold_mb
@@ -311,6 +338,8 @@ upload:
   after_upload: delete     # archive: move the uploaded shard to final/uploaded/shard_NNNN (nothing deleted)
                            # delete:  remove the local copy (and its media when include_media) to free disk
   retries: 3
+  release_gate: true       # run the release gates (schema, JSONL==Parquet ids, split leakage, media when
+                           # include_media) before every upload; a failing gate aborts the upload
 
 cleanup:
   after_export: all      # none | media | all - what to delete automatically once a video's EXPORT is DONE

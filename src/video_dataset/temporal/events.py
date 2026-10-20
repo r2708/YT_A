@@ -3,6 +3,8 @@ scene ids, boundary precision and a confidence that is either derived from a rea
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 from video_dataset.config import TemporalConfig
 from video_dataset.schemas.common import ConfidenceSource
 from video_dataset.schemas.events import Event, EventSource, EventType
@@ -61,6 +63,23 @@ def entities_for_action(action: str, analysis: SceneAnalysis) -> list[str]:
     return out
 
 
+def motion_span(trajectory: list[list[float]], min_step: float = 0.02) -> tuple[float, float] | None:
+    """(start, end) of the stretch in which a tracked subject actually moves: the first and last
+    trajectory points whose box centre / size differs from the previous point by at least
+    ``min_step`` (fraction of the frame). None when the trajectory is too short or never moves."""
+    pts = [p for p in trajectory if len(p) >= 4]
+    if len(pts) < 3:
+        return None
+    moving: list[float] = []
+    for prev, cur in pairwise(pts):
+        if abs(cur[1] - prev[1]) >= min_step or abs(cur[2] - prev[2]) >= min_step or abs(cur[3] - prev[3]) >= min_step:
+            moving.append(float(prev[0]))
+            moving.append(float(cur[0]))
+    if not moving:
+        return None
+    return min(moving), max(moving)
+
+
 def transition_confidence(score: float | None, threshold: float | None) -> float | None:
     """Monotone map of the measured content change at a cut into [0.5, 1]: at threshold -> 0.5, at 2x -> 1.0."""
     if score is None or not threshold:
@@ -72,9 +91,11 @@ log = get_logger("temporal.events")
 
 
 class EventExtractor:
-    def __init__(self, cfg: TemporalConfig, scene_threshold: float | None = None):
+    def __init__(self, cfg: TemporalConfig, scene_threshold: float | None = None, source_fps: float | None = None, track_fps: float | None = None):
         self.cfg = cfg
         self.scene_threshold = scene_threshold
+        self.source_fps = source_fps
+        self.track_fps = track_fps
 
     # ------------------------------------------------------------------ public
     def extract(
@@ -108,11 +129,39 @@ class EventExtractor:
             events += self._state_change_events(video_id, scenes, frames, analyses)
 
         events.sort(key=lambda e: (e.start_time, e.end_time, str(e.event_type)))
+        scan_step = next((1.0 / s.analysis_fps for s in scans if s.analysis_fps), None)
         for i, e in enumerate(events, start=1):
             e.event_id = make_event_id(i)
             e.start_time = round(clamp(e.start_time, 0.0, duration), 3)
             e.end_time = round(clamp(max(e.end_time, e.start_time), 0.0, duration), 3)
+            self._uncertainty(e, scan_step)
         return events
+
+    def _uncertainty(self, e: Event, scan_step: float | None) -> None:
+        """Fill start / end uncertainty from the method that timed the event (never implies more
+        precision than the sampling cadence supports)."""
+        if e.start_uncertainty_ms is not None and e.end_uncertainty_ms is not None:
+            return
+        if e.boundary_precision == "scene":
+            # inherited from the shot: the action may start or end anywhere inside it
+            span_ms = round(1000.0 * max(0.0, e.end_time - e.start_time), 1)
+            e.start_uncertainty_ms, e.end_uncertainty_ms = span_ms, span_ms
+        elif e.boundary_precision == "measured":
+            step = e.attributes.get("timing_step_seconds") or scan_step or 0.25
+            e.start_uncertainty_ms = e.end_uncertainty_ms = round(1000.0 * float(step), 1)
+        elif e.boundary_precision == "asr":
+            e.start_uncertainty_ms = e.end_uncertainty_ms = 150.0  # whisper segment / word alignment
+        elif e.boundary_precision == "frame":
+            frame_ms = 1000.0 / self.source_fps if self.source_fps else 50.0
+            if e.event_type == EventType.TEXT_ON_SCREEN:
+                # OCR runs on sampled frames: the text may have appeared anywhere since the previous sample
+                e.start_uncertainty_ms = e.end_uncertainty_ms = round(1000.0 * float(e.attributes.get("sampling_gap_seconds") or 1.0), 1)
+            elif e.event_type == EventType.STATE_CHANGE:
+                e.start_uncertainty_ms = e.end_uncertainty_ms = round(1000.0 * max(0.0, e.end_time - e.start_time) / 2.0, 1)
+            else:
+                e.start_uncertainty_ms = e.end_uncertainty_ms = round(frame_ms, 1)
+        else:
+            e.start_uncertainty_ms = e.end_uncertainty_ms = round(1000.0 * max(0.0, e.end_time - e.start_time), 1)
 
     # ------------------------------------------------------------------ sources
     def _vision_events(self, video_id: str, scenes: list[Scene], frames: list[Frame], analyses: dict[str, SceneAnalysis]) -> list[Event]:
@@ -125,27 +174,45 @@ class EventExtractor:
             fids = frames_in(frames, scene.start_time, scene.end_time, [scene.scene_id])
             conf = a.confidence
             src = ConfidenceSource(a.confidence_source) if conf is not None else ConfidenceSource.UNAVAILABLE
+            sm = a.subject_motion
             for action in a.actions:
                 if not action or action.lower().startswith("camera "):
                     continue  # camera motion is covered by measured camera events
+                start, end, precision = scene.start_time, scene.end_time, "scene"
+                attrs: dict = {"provider": a.provider, "model": a.model}
+                e_conf, e_src = conf, src
+                if sm is not None and sm.label != "static" and sm.trajectory and sm.subject.lower() in action.lower():
+                    # the subject's measured path times the action inside the shot (tracker / box cadence)
+                    span = motion_span(sm.trajectory)
+                    if span is not None:
+                        start = max(scene.start_time, span[0])
+                        end = min(scene.end_time, max(span[1], start))
+                        precision = "measured"
+                        step = (1.0 / self.track_fps) if (sm.method == "tracker" and self.track_fps) else None
+                        if step is None and len(sm.trajectory) >= 2:
+                            gaps = [b[0] - a_[0] for a_, b in zip(sm.trajectory, sm.trajectory[1:]) if b[0] > a_[0]]
+                            step = max(gaps) if gaps else None
+                        attrs.update({"timing_method": sm.method, "timing_step_seconds": round(step, 3) if step else None})
+                        if sm.confidence is not None:
+                            e_conf, e_src = sm.confidence, ConfidenceSource.MEASUREMENT
                 out.append(
                     Event(
                         event_id="tmp",
                         video_id=video_id,
                         event_type=EventType.ACTION,
-                        start_time=scene.start_time,
-                        end_time=scene.end_time,
+                        start_time=start,
+                        end_time=end,
                         event=sentence(action),
                         entities=entities_for_action(action, a),
                         action=lower_first(action),
                         scene_ids=[scene.scene_id],
-                        frame_ids=fids,
+                        frame_ids=frames_in(frames, start, end, [scene.scene_id]) if precision == "measured" else fids,
                         source=EventSource.VISION,
                         source_ids=[scene.scene_id],
-                        confidence=conf,
-                        confidence_source=src,
-                        boundary_precision="scene",
-                        attributes={"provider": a.provider, "model": a.model},
+                        confidence=e_conf,
+                        confidence_source=e_src,
+                        boundary_precision=precision,
+                        attributes=attrs,
                         verification=a.verification,
                     )
                 )
@@ -293,6 +360,9 @@ class EventExtractor:
             skipped = [t for t in tracks if not t.is_event_worthy]
             if skipped:
                 log.info("ocr: %d of %d text tracks are static overlays %s or fragments; not emitted as events", len(skipped), len(tracks), overlays)
+        times = sorted({f.timestamp for f in frames})
+        gaps = [b - a for a, b in pairwise(times)]
+        typical_gap = round(float(sorted(gaps)[len(gaps) // 2]), 3) if gaps else 1.0
         for tr in tracks:
             if not tr.is_event_worthy:
                 continue
@@ -314,7 +384,7 @@ class EventExtractor:
                     confidence=tr.mean_confidence,
                     confidence_source=ConfidenceSource.OCR_SCORE if tr.mean_confidence is not None else ConfidenceSource.UNAVAILABLE,
                     boundary_precision="frame",
-                    attributes={"num_detections": tr.num_detections, "bbox": tr.bbox},
+                    attributes={"num_detections": tr.num_detections, "bbox": tr.bbox, "sampling_gap_seconds": typical_gap},
                 )
             )
         return out

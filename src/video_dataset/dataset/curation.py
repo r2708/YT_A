@@ -11,9 +11,10 @@ import hashlib
 from typing import Any
 
 from video_dataset.config import CinematicSubsetConfig, ExportConfig, LicensingConfig, SplitConfig, TierConfig
-from video_dataset.schemas.common import ConfidenceSource
+from video_dataset.schemas.common import SCHEMA_VERSION, ConfidenceSource
 from video_dataset.schemas.curation import Split, Tier
 from video_dataset.schemas.quality import ValidationStatus
+from video_dataset.validation.policy import strict_ok
 
 SCENE_LEVEL = ("scenes", "clips", "frames")  # records that describe exactly one shot
 _TIER_ORDER = {Tier.GOLD: 3, Tier.SILVER: 2, Tier.BRONZE: 1}
@@ -27,6 +28,30 @@ _TRUSTED_CONFIDENCE = {
     ConfidenceSource.DERIVED_MIN,
 }
 LICENSED_SUBSET = "licensed"
+STRICT_SUBSET = "strict"
+RIGHTS_STATUSES = ("declared_cc_by", "restricted", "unknown", "removed")
+
+
+def rights_status_for(license_status: str | None, source_type: str | None = None) -> str:
+    """Rights status of a source from its normalised license. The platform's declaration is the
+    only evidence available, so a CC-BY video is ``declared_cc_by`` (not "verified"), the standard
+    YouTube license is ``restricted`` (viewable, not redistributable), a local file or anything
+    else is ``unknown``."""
+    st = str(license_status or "").lower()
+    if st == "creative_commons":
+        return "declared_cc_by"
+    if st in ("standard", "other"):
+        return "restricted"
+    return "unknown"
+
+
+def duration_band(duration: float | None, bands: dict[str, list[float]]) -> str | None:
+    if duration is None:
+        return None
+    for name, (lo, hi) in bands.items():
+        if float(lo) <= float(duration) < float(hi):
+            return name
+    return None
 
 
 # ------------------------------------------------------------------------------------ split
@@ -208,9 +233,12 @@ def annotate_records(
     records["sequences"] = build_sequences(records, cfg.sequences) if cfg.sequences.enabled else []
     fill_prompt_variants(records, int(cfg.prompt_variants), seed)
 
-    counts = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0}
+    counts = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0, "strict": 0, "dropped_rights_records": 0}
     dup_videos: set[str] = set()
     licensed_videos: set[str] = set()
+    release_rights = {str(r).lower() for r in ((licensing.release_rights if licensing else []) or [])}
+    strict_cfg = getattr(cfg, "strict", None)
+    bands = dict(getattr(cfg, "duration_bands", {}) or {})
     for kind, rows in list(records.items()):
         kept_rows: list[dict[str, Any]] = []
         for rec in rows:
@@ -225,7 +253,14 @@ def annotate_records(
                 if cfg.exclude_duplicate_videos:
                     counts["dropped_duplicate_records"] += 1
                     continue
+            rights = str(vinfo.get("rights_status") or rights_status_for(vinfo.get("license_status")))
+            if getattr(cfg, "require_rights", False) and rights not in release_rights:
+                counts["dropped_rights_records"] += 1
+                continue
             split_id = canonical or vid
+            rec["source_group_id"] = split_id or None
+            rec["schema_version"] = SCHEMA_VERSION
+            rec["coverage"] = dict(vinfo.get("coverage") or rec.get("coverage") or {})
             rec["split"] = split_for_video(split_id, cfg.split).value if cfg.split.enabled and split_id else None
             if cfg.tiers.enabled:
                 tier, reasons = tier_for_record(rec, cfg.tiers)
@@ -243,6 +278,23 @@ def annotate_records(
             if licensed_subset and status and status in allowed:
                 rec["subsets"].append(LICENSED_SUBSET)
                 licensed_videos.add(vid)
+            if rights in release_rights:
+                rec["subsets"].append(f"rights_{rights}")
+            if bands and kind in ("scenes", "clips", "sequences"):
+                d = rec.get("duration")
+                if d is None and rec.get("start_time") is not None and rec.get("end_time") is not None:
+                    d = float(rec["end_time"]) - float(rec["start_time"])
+                band = duration_band(d, bands)
+                if band:
+                    rec["subsets"].append(f"duration_{band}")
+            if strict_cfg is not None and getattr(strict_cfg, "enabled", False):
+                ok, _why = strict_ok(rec)
+                targets = set(getattr(strict_cfg, "generation_targets", []) or [])
+                if ok and kind in ("scenes", "clips", "sequences") and targets and rec.get("generation_target") not in targets:
+                    ok = False
+                if ok:
+                    rec["subsets"].append(STRICT_SUBSET)
+                    counts["strict"] += 1
             kept_rows.append(rec)
         records[kind] = kept_rows
     counts["duplicate_videos"] = len(dup_videos)
@@ -274,3 +326,23 @@ def split_manifest(records: dict[str, list[dict[str, Any]]]) -> dict[str, list[s
             if sp in out and rec.get("video_id"):
                 out[sp].add(str(rec["video_id"]))
     return {k: sorted(v) for k, v in out.items()}
+
+
+def split_leaks(records: dict[str, list[dict[str, Any]]]) -> dict[str, list[str]]:
+    """Videos / source groups whose records sit in more than one split: {id: [splits]}. Empty = no
+    leakage. Checked per video id and per ``source_group_id`` (near-duplicate clusters)."""
+    by_video: dict[str, set[str]] = {}
+    by_group: dict[str, set[str]] = {}
+    for rows in records.values():
+        for rec in rows:
+            sp = rec.get("split")
+            if not sp:
+                continue
+            if rec.get("video_id"):
+                by_video.setdefault(str(rec["video_id"]), set()).add(str(sp))
+            grp = rec.get("source_group_id") or rec.get("canonical_video_id") or rec.get("video_id")
+            if grp:
+                by_group.setdefault(str(grp), set()).add(str(sp))
+    leaks = {k: sorted(v) for k, v in by_video.items() if len(v) > 1}
+    leaks.update({f"group:{k}": sorted(v) for k, v in by_group.items() if len(v) > 1})
+    return leaks

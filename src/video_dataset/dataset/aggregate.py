@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Any
 
 from video_dataset.config import PipelineConfig
-from video_dataset.dataset.curation import annotate_records, split_manifest, subset_records, video_info_from_manifests
+from video_dataset.dataset.curation import (
+    STRICT_SUBSET,
+    annotate_records,
+    rights_status_for,
+    split_manifest,
+    subset_records,
+    video_info_from_manifests,
+)
 from video_dataset.dataset.export import (
     CINEMATIC_DIR,
     COMBINED_FILE,
@@ -33,12 +40,37 @@ from video_dataset.dataset.export import (
     write_schema_file,
     write_typed_parquet_files,
 )
+from video_dataset.dataset.media_manifest import write_media_manifest
+from video_dataset.dataset.review import LABELS_FILE, apply_review_labels, read_review_labels
 from video_dataset.dataset.stats import compute_diversity, compute_statistics
+from video_dataset.dataset.takedown import removed_sources
+from video_dataset.schemas.common import SCHEMA_VERSION
 from video_dataset.storage.state_db import StateDB
-from video_dataset.utils.io import read_json, read_jsonl, write_json_atomic
+from video_dataset.utils.environment import environment_manifest
+from video_dataset.utils.io import read_json, read_jsonl, write_json_atomic, write_jsonl
 from video_dataset.utils.logging import get_logger
+from video_dataset.validation.policy import POLICY_VERSION
 
 log = get_logger("dataset.aggregate")
+STRICT_DIR = "strict"
+PROVENANCE_FILE = "provenance.jsonl"
+
+
+def provenance_rows(manifests: list[dict[str, Any]], video_info: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per source video: everything needed to audit or remove it later. No credentials, no
+    commenter data; channel name is public metadata."""
+    rows = []
+    for m in manifests:
+        vid = str(m.get("video_id"))
+        rows.append({
+            "video_id": vid, "url": m.get("url"), "youtube_id": m.get("youtube_id"), "channel": m.get("channel"), "title": m.get("title"),
+            "upload_date": m.get("upload_date"), "retrieved_at": m.get("retrieved_at"), "duration": m.get("duration"),
+            "license": m.get("license"), "license_status": m.get("license_status"),
+            "rights_status": m.get("rights_status") or rights_status_for(m.get("license_status")),
+            "source_sha256": m.get("source_sha256"), "canonical_video_id": video_info.get(vid, {}).get("canonical_video_id"),
+            "coverage": m.get("coverage") or {}, "quality_flags": m.get("quality_flags") or [],
+        })
+    return rows
 
 
 def _record_key(rec: dict[str, Any]) -> str | None:
@@ -144,23 +176,44 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
             log.info("keeping %d record(s) of previously exported videos whose per-video export is gone", kept)
         records = merge_records(existing, records, fresh_ids)
 
+    # sources removed by a takedown never come back through merge_existing or a stale per_video export
+    removed = removed_sources(final_dir)
+    if removed:
+        manifests = [m for m in manifests if str(m.get("video_id")) not in removed]
+        for name in list(records):
+            records[name] = [r for r in records[name] if str(r.get("video_id")) not in removed]
+
     # one schema for every record, then split / tier / subsets (near-duplicate videos share a split)
     records = upgrade_records(records)
     video_info = video_info_from_manifests(manifests, float(config.deduplication.video_similarity_threshold), bool(config.deduplication.video_fingerprint))
+    for m in manifests:
+        vi = video_info.setdefault(str(m.get("video_id")), {})
+        vi.setdefault("rights_status", m.get("rights_status") or rights_status_for(m.get("license_status")))
+        vi.setdefault("coverage", m.get("coverage") or {})
+    labels = read_review_labels(final_dir / LABELS_FILE)
+    review_counts = apply_review_labels(records, labels)  # human verdicts win over the automatic status
     curation = annotate_records(records, config.export, video_info, config.licensing, seed=int(config.qa.seed))
+    curation["human_reviews"] = review_counts
     for m in manifests:  # record the resolved canonical ids so the manifest explains the splits
         vi = video_info.get(str(m.get("video_id")), {})
         m["canonical_video_id"] = vi.get("canonical_video_id")
+        m["rights_status"] = vi.get("rights_status")
     splits = split_manifest(records)
 
     counts, combined_rows, typed_counts, parquet_rows = _write_dataset_files(records, final_dir, config)
     write_schema_file(final_dir / SCHEMA_FILE)
-    write_json_atomic(final_dir / SPLITS_FILE, {"salt": config.export.split.salt, "fractions": {"validation": config.export.split.validation_fraction, "test": config.export.split.test_fraction}, "videos": splits, "counts": {k: len(v) for k, v in splits.items()}})
+    write_json_atomic(final_dir / SPLITS_FILE, {"salt": config.export.split.salt, "fractions": {"validation": config.export.split.validation_fraction, "test": config.export.split.test_fraction}, "videos": splits, "counts": {k: len(v) for k, v in splits.items()}, "groups": {str(m.get("video_id")): video_info.get(str(m.get("video_id")), {}).get("canonical_video_id") or str(m.get("video_id")) for m in manifests}})
+    write_jsonl(final_dir / PROVENANCE_FILE, provenance_rows(manifests, video_info))
+    media_summary = write_media_manifest(records, final_dir, config.data_dir, bool(getattr(config.export, "hash_media", False))) if getattr(config.export, "media_manifest", True) else {}
 
     cinematic_counts: dict[str, int] = {}
     if config.export.cinematic.enabled and config.export.cinematic.write_files:
         subset = subset_records(records, "cinematic")
         cinematic_counts, _c, _t, _p = _write_dataset_files(subset, final_dir / CINEMATIC_DIR, config)
+    strict_counts: dict[str, int] = {}
+    strict_cfg = getattr(config.export, "strict", None)
+    if strict_cfg is not None and strict_cfg.enabled and strict_cfg.write_files:
+        strict_counts, _c, _t, _p = _write_dataset_files(subset_records(records, STRICT_SUBSET), final_dir / STRICT_DIR, config)
 
     videos = db.list_videos()
     exported_ids = {m["video_id"] for m in manifests}
@@ -177,7 +230,12 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
             "combined_jsonl_rows": combined_rows,
             "typed_parquet_counts": typed_counts,
             "cinematic": {**curation, "files": cinematic_counts},
+            "strict": {"records": curation.get("strict", 0), "files": strict_counts},
             "curation": curation,
+            "media_references": media_summary,
+            "removed_sources": len(removed),
+            "schema_version": SCHEMA_VERSION,
+            "policy_version": POLICY_VERSION,
             "diversity": compute_diversity(records, manifests),
             "files": {
                 **({name: str(final_dir / f"{name}.jsonl") for name in DATASET_FILES} if config.export.per_type_jsonl else {}),
@@ -187,12 +245,19 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
                 "schemas": str(final_dir / SCHEMA_FILE),
                 "splits": str(final_dir / SPLITS_FILE),
                 **({"cinematic_dir": str(final_dir / CINEMATIC_DIR)} if cinematic_counts else {}),
+                **({"strict_dir": str(final_dir / STRICT_DIR)} if strict_counts else {}),
+                "provenance": str(final_dir / PROVENANCE_FILE),
             },
             "jsonl_counts": counts,
         },
     )
     write_json_atomic(final_dir / "statistics.json", stats)
-    write_json_atomic(final_dir / "manifest.json", {"videos": manifests, "counts": counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows, "splits": {k: len(v) for k, v in splits.items()}, "cinematic": cinematic_counts})
+    write_json_atomic(final_dir / "manifest.json", {
+        "videos": manifests, "counts": counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows,
+        "splits": {k: len(v) for k, v in splits.items()}, "cinematic": cinematic_counts, "strict": strict_counts,
+        "schema_version": SCHEMA_VERSION, "policy_version": POLICY_VERSION, "media_references": media_summary,
+        "removed_sources": sorted(removed), "environment": environment_manifest(config),
+    })
     log.info("aggregated %d videos -> %s (splits %s, cinematic records %d)", len(manifests), final_dir, {k: len(v) for k, v in splits.items()}, curation.get("cinematic", 0))
     return stats
 

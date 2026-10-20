@@ -46,6 +46,11 @@ class Event(TimeSpan):
     confidence: float | None = Field(default=None, ge=0, le=1)
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     boundary_precision: str = "scene"  # "scene" | "measured" | "asr" | "frame" | "approximate"
+    # How far the true start / end may lie from the recorded one, from the method's own resolution:
+    # a shot-inherited boundary is uncertain by the whole shot, an optical-flow boundary by one scan
+    # step, an ASR boundary by the word alignment, a cut by one frame. None = not estimated.
+    start_uncertainty_ms: float | None = Field(default=None, ge=0)
+    end_uncertainty_ms: float | None = Field(default=None, ge=0)
     attributes: dict[str, Any] = Field(default_factory=dict)
     verification: VerificationResult | None = None
 
@@ -76,6 +81,10 @@ class TemporalRelation(BaseSchema):
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     derivation: str = "interval_algebra"  # how the relation was inferred
     rationale: str | None = None
+    # measured: deterministic from the event intervals / rules over measured events;
+    # model_inferred: proposed by a model (e.g. CAUSES from an LLM) and never verified;
+    # human: confirmed by a reviewer
+    evidence_kind: str = "measured"
 
 
 class Timeline(BaseSchema):

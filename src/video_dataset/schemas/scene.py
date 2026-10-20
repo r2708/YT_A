@@ -82,6 +82,12 @@ class SceneScan(BaseSchema):
 
 
 class Clip(TimeSpan):
+    """``start_time`` / ``end_time`` are the *requested* half-open interval of the source video. What
+    the file really holds is measured after cutting: ``media_duration`` (ffprobe) and, when the
+    boundary check ran, ``actual_start`` / ``actual_end`` (the source timestamps of the file's first
+    and last frames, found by matching their perceptual hashes against source frames around the
+    requested boundaries)."""
+
     clip_id: str
     video_id: str
     scene_id: str
@@ -94,6 +100,10 @@ class Clip(TimeSpan):
     width: int | None = None
     height: int | None = None
     normalized: bool = False  # re-encoded to frame_sampling.target_fps / target size
+    actual_start: float | None = None  # source time of the first frame in the file (boundary check)
+    actual_end: float | None = None  # source time of the last frame in the file (boundary check)
+    boundary_error_seconds: float | None = None  # max(|actual_start - start_time|, |actual_end - end_time|)
+    boundary_check: str = "not_run"  # passed | failed | not_run | error (frame-hash comparison with the source)
 
 
 class SceneDetectionResult(BaseSchema):

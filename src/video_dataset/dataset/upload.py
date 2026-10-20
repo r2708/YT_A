@@ -36,9 +36,9 @@ log = get_logger("dataset.upload")
 DATASET_ROOT_FILES = (
     [f"{n}.jsonl" for n in DATASET_FILES]
     + [f"{n}.parquet" for n in DATASET_FILES]
-    + [COMBINED_FILE, "dataset.parquet", SCHEMA_FILE, SPLITS_FILE, "statistics.json", "manifest.json"]
+    + [COMBINED_FILE, "dataset.parquet", SCHEMA_FILE, SPLITS_FILE, "statistics.json", "manifest.json", "provenance.jsonl", "media_manifest.jsonl", "release_report.json"]
 )
-DATASET_ROOT_DIRS = [CINEMATIC_DIR]  # subset directories with the same layout, shipped as a whole
+DATASET_ROOT_DIRS = [CINEMATIC_DIR, "strict"]  # subset directories with the same layout, shipped as a whole
 STATE_FILE = "uploads.json"
 UPLOADED_DIR = "uploaded"
 AFTER_UPLOAD_MODES = ("archive", "delete")
@@ -396,6 +396,13 @@ def check_and_upload(
     if size < threshold and not force:
         log.info("upload: current shard is %.1f MB of %.0f MB, %d video(s) - waiting", size / 1e6, threshold / 1e6, len(videos))
         return None
+
+    if getattr(cfg, "release_gate", True) and not dry_run:
+        from video_dataset.dataset.release import run_release_check
+
+        report = run_release_check(config, final_dir, require_media=bool(cfg.include_media))
+        if not report["ok"]:
+            raise UploadError(f"release gate failed ({', '.join(report['failed_gates'])}); see {final_dir / 'release_report.json'} - fix the data or set upload.release_gate=false")
 
     state = UploadState.load(final_dir)
     index = state.next_shard

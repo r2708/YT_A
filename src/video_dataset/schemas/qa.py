@@ -62,6 +62,9 @@ class QARecord(BaseSchema):
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
     generator: str = "template"
     template_id: str | None = None
+    # What kind of answer the question asks for: description | time | duration | order | count | change.
+    # Derived from ``type`` at generation time; the validator checks the answer text matches it.
+    answer_type: str | None = None
     options: list[str] = Field(default_factory=list)  # for ordering / multiple-choice style questions
     is_long_range: bool = False
     quality: QualityScore | None = None
@@ -72,6 +75,11 @@ class QARecord(BaseSchema):
     tier_reasons: list[str] = Field(default_factory=list)
     subsets: list[str] = Field(default_factory=list)  # e.g. ["cinematic", "licensed"]
     canonical_video_id: str | None = None  # set when the source video is a near-duplicate of another video
+    source_group_id: str | None = None
+    schema_version: str | None = None
+    coverage: dict[str, str] = Field(default_factory=dict)
+    annotation_scope: str | None = "qa"
+    generation_target: str | None = "not_for_generation"
 
     @model_validator(mode="before")
     @classmethod

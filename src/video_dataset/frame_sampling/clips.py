@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from video_dataset.config import FrameSamplingConfig
+from video_dataset.frame_sampling.boundary import BoundaryResult, check_clip_boundaries
 from video_dataset.schemas.scene import Clip, Frame, Scene
 from video_dataset.utils.ffmpeg import ffprobe_json, run_ffmpeg
 from video_dataset.utils.ids import clip_id as make_clip_id
@@ -36,6 +37,10 @@ class ClipStats:
     failed: int = 0
     reused: int = 0
     worst_error_seconds: float = 0.0
+    boundary_checked: int = 0  # clips whose first / last frames were matched against the source
+    boundary_failed: int = 0  # ... and found outside the tolerance
+    boundary_errors: int = 0  # ... or could not be matched / decoded
+    worst_boundary_error_seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
 
     def as_metrics(self) -> dict[str, int | float]:
@@ -43,6 +48,8 @@ class ClipStats:
             "clips": self.total, "clips_stream_copied": self.stream_copied, "clips_reencoded": self.reencoded,
             "clips_inexact": self.inexact, "clips_failed": self.failed, "clips_reused": self.reused,
             "clip_worst_error_seconds": round(self.worst_error_seconds, 3),
+            "clips_boundary_checked": self.boundary_checked, "clips_boundary_failed": self.boundary_failed,
+            "clips_boundary_errors": self.boundary_errors, "clip_worst_boundary_error_seconds": round(self.worst_boundary_error_seconds, 3),
         }
 
 
@@ -152,16 +159,26 @@ def _plan(scenes: list[Scene], max_len: float) -> list[_ClipTask]:
     return tasks
 
 
+def _should_verify(mode: str, produced_by: str | None) -> bool:
+    mode = (mode or "copy").lower()
+    if mode in ("none", "off", "false", "0"):
+        return False
+    if mode == "all":
+        return True
+    return produced_by != "libx264"  # copy: stream-copied clips and clips of unknown origin (reused files)
+
+
 def _cut_one(
     task: _ClipTask, video_path: Path, video_id: str, frames: list[Frame], out_dir: Path, codec: str, tolerance: float,
     clip_height: int, has_audio: bool, ffmpeg_path: str | None, ffprobe_path: str | None, vf: str | None = None, normalized: bool = False,
+    source_fps: float | None = None, verify: str = "copy", search: float = 1.0, max_hamming: int = 14,
 ) -> tuple[Clip | None, dict[str, float], str | None]:
-    """Cut / measure / re-cut one clip. Returns (clip, stat deltas, error) and never raises."""
+    """Cut / measure / re-cut / verify one clip. Returns (clip, stat deltas, error) and never raises."""
     scene, start, end = task.scene, task.start, task.end
     expected = end - start
     cid = make_clip_id(scene.index, task.part)
     out = out_dir / f"{cid}.mp4"
-    delta: dict[str, float] = {"stream_copied": 0, "reencoded": 0, "reused": 0, "error": 0.0}
+    delta: dict[str, float] = {"stream_copied": 0, "reencoded": 0, "reused": 0, "error": 0.0, "boundary_checked": 0, "boundary_failed": 0, "boundary_errors": 0, "boundary_error": 0.0}
     produced_by: str | None = None
     probe: dict[str, float | int | None] = {"duration": None, "fps": None, "width": None, "height": None}
     try:
@@ -195,6 +212,16 @@ def _cut_one(
         return None, delta, f"{cid}: {exc}"[:200]
 
     delta["error"] = error
+    boundary = BoundaryResult("not_run")
+    if source_fps and _should_verify(verify, produced_by):
+        boundary = check_clip_boundaries(video_path, out, start, end, float(source_fps), tolerance=tolerance, search=search, max_hamming=max_hamming)
+        delta["boundary_checked"] += 1
+        if boundary.state == "failed":
+            delta["boundary_failed"] += 1
+        elif boundary.state == "error":
+            delta["boundary_errors"] += 1
+        if boundary.error_seconds is not None:
+            delta["boundary_error"] = boundary.error_seconds
     clip = Clip(
         clip_id=cid,
         video_id=video_id,
@@ -210,6 +237,10 @@ def _cut_one(
         width=int(probe["width"]) if probe.get("width") else None,
         height=int(probe["height"]) if probe.get("height") else None,
         normalized=bool(normalized and produced_by == "libx264"),
+        actual_start=boundary.actual_start,
+        actual_end=boundary.actual_end,
+        boundary_error_seconds=boundary.error_seconds,
+        boundary_check=boundary.state,
     )
     return clip, delta, None
 
@@ -225,9 +256,11 @@ def extract_clips(
     ffmpeg_path: str | None = None,
     ffprobe_path: str | None = None,
     workers: int = 1,
+    source_fps: float | None = None,
 ) -> tuple[list[Clip], ClipStats]:
     """Cut every scene (split into ``clip_max_duration`` parts) on ``workers`` threads. FFmpeg and
-    ffprobe run as subprocesses, so threads give near-linear speed-up; results keep scene order."""
+    ffprobe run as subprocesses, so threads give near-linear speed-up; results keep scene order.
+    With ``source_fps`` the boundary check (``frame_sampling.verify_clip_boundaries``) runs too."""
     out_dir.mkdir(parents=True, exist_ok=True)
     codec = (cfg.clip_codec or "auto").lower()
     if codec not in CLIP_CODECS:
@@ -249,8 +282,15 @@ def extract_clips(
     )
     progress = ProgressLog(log, "clip extraction", len(tasks), unit="clips", every_seconds=10)
 
+    verify = str(getattr(cfg, "verify_clip_boundaries", "copy") or "copy")
+    search = float(getattr(cfg, "boundary_search_seconds", 1.0) or 1.0)
+    max_hamming = int(getattr(cfg, "boundary_max_hamming", 14) or 14)
+
     def _run(task: _ClipTask) -> tuple[Clip | None, dict[str, float], str | None]:
-        return _cut_one(task, video_path, video_id, frames, out_dir, codec, tolerance, clip_height, has_audio, ffmpeg_path, ffprobe_path, vf=vf, normalized=normalized)
+        return _cut_one(
+            task, video_path, video_id, frames, out_dir, codec, tolerance, clip_height, has_audio, ffmpeg_path, ffprobe_path, vf=vf, normalized=normalized,
+            source_fps=source_fps, verify=verify, search=search, max_hamming=max_hamming,
+        )
 
     def _collect(i: int, res: tuple[Clip | None, dict[str, float], str | None]) -> None:
         clip, delta, err = res
@@ -264,6 +304,10 @@ def extract_clips(
             if not clip.exact:
                 stats.inexact += 1
             stats.worst_error_seconds = max(stats.worst_error_seconds, float(delta["error"]))
+            stats.boundary_checked += int(delta["boundary_checked"])
+            stats.boundary_failed += int(delta["boundary_failed"])
+            stats.boundary_errors += int(delta["boundary_errors"])
+            stats.worst_boundary_error_seconds = max(stats.worst_boundary_error_seconds, float(delta["boundary_error"]))
         progress.update(i + 1, extra=f"{stats.reencoded} re-encoded, {stats.failed} failed")
 
     results = parallel_map(_run, tasks, workers, on_done=_collect)
@@ -272,6 +316,11 @@ def extract_clips(
         log.warning(
             "%d of %d clips are off by more than %.2fs (worst %.2fs); use frame_sampling.clip_codec=auto or libx264 for exact cuts",
             stats.inexact, stats.total, tolerance, stats.worst_error_seconds,
+        )
+    if stats.boundary_failed or stats.boundary_errors:
+        log.warning(
+            "boundary check: %d of %d checked clips start/end outside the %.2fs tolerance (worst %.2fs), %d could not be matched",
+            stats.boundary_failed, stats.boundary_checked, tolerance, stats.worst_boundary_error_seconds, stats.boundary_errors,
         )
     progress.finish(f"{len(clips)} clips")
     return clips, stats

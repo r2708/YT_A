@@ -21,3 +21,4 @@ pipeline:
                                # workers: 8 on 8 cores gives 1 thread per video, workers: 1 gives 4)
   model_stages_sequential: false # model stages run one video at a time so models load once
   stage_timeout_seconds: null
+  rerun_on_config_change: false # true: a DONE stage whose config section changed is re-run (with everything after it)

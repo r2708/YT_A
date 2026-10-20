@@ -74,7 +74,7 @@ def _other_event(q: QARecord, events: list[Event], rng: random.Random, min_gap: 
     for e in pool:
         text = sentence(_phrase(e))
         if _distinct(text, q.answer):
-            return HardNegative(text=text, kind="other_event", source_ids=[e.event_id], note=f"happens at {e.start_time:.1f}s, outside the evidence window {start:.1f}-{end:.1f}s")
+            return HardNegative(text=text, kind="other_event", source_ids=[e.event_id], note=f"happens at {e.start_time:.1f}s, outside the evidence window {start:.1f}-{end:.1f}s", verification_status="measured_difference", evidence_interval=[round(start, 3), round(end, 3)])
     return None
 
 
@@ -82,11 +82,11 @@ def _swapped_order(q: QARecord) -> HardNegative | None:
     m = _FIRST_THEN.match(q.answer.strip())
     if m:
         text = f"First {m.group('b')}, then {m.group('a')}."
-        return HardNegative(text=text, kind="swapped_order", source_ids=list(q.evidence.event_ids), note="order of the two events reversed")
+        return HardNegative(text=text, kind="swapped_order", source_ids=list(q.evidence.event_ids), note="order of the two events reversed", verification_status="rule_derived", evidence_interval=list(_window(q)))
     ans = q.answer.strip()
     for a, b in (("Before.", "After."), ("After.", "Before.")):
         if ans.startswith(a):
-            return HardNegative(text=b + ans[len(a):], kind="swapped_order", source_ids=list(q.evidence.event_ids), note="before/after verdict flipped")
+            return HardNegative(text=b + ans[len(a):], kind="swapped_order", source_ids=list(q.evidence.event_ids), note="before/after verdict flipped", verification_status="rule_derived", evidence_interval=list(_window(q)))
     return None
 
 
@@ -103,7 +103,7 @@ def _wrong_duration(q: QARecord) -> HardNegative | None:
     text = f"{approx_duration_phrase(d2).capitalize()} (from {a:.1f}s to {a + d2:.1f}s)."
     if not _distinct(text, q.answer):
         return None
-    return HardNegative(text=text, kind="wrong_duration", source_ids=list(q.evidence.event_ids), note=f"measured duration {d:.1f}s, negative claims {d2:.1f}s")
+    return HardNegative(text=text, kind="wrong_duration", source_ids=list(q.evidence.event_ids), note=f"measured duration {d:.1f}s, negative claims {d2:.1f}s", verification_status="measured_difference", evidence_interval=list(_window(q)))
 
 
 def _shifted_time(q: QARecord, duration: float) -> HardNegative | None:
@@ -116,7 +116,7 @@ def _shifted_time(q: QARecord, duration: float) -> HardNegative | None:
     if abs(t2 - t) < 3.0:
         return None
     text = f"{approx_timestamp_phrase(t2).capitalize()} (starts at {t2:.1f}s)."
-    return HardNegative(text=text, kind="shifted_time", source_ids=list(q.evidence.event_ids), note=f"measured start {t:.1f}s, negative claims {t2:.1f}s")
+    return HardNegative(text=text, kind="shifted_time", source_ids=list(q.evidence.event_ids), note=f"measured start {t:.1f}s, negative claims {t2:.1f}s", verification_status="measured_difference", evidence_interval=list(_window(q)))
 
 
 def qa_hard_negatives(q: QARecord, events: list[Event], duration: float, rng: random.Random, limit: int = 3) -> list[HardNegative]:
@@ -156,11 +156,11 @@ def _attribute_swaps(a: SceneAnalysis) -> list[HardNegative]:
     if known_motion and mov in OPPOSITE_MOVEMENT:
         phrase, other = MOVEMENT_PHRASES[mov], MOVEMENT_PHRASES[OPPOSITE_MOVEMENT[mov]]
         if phrase in text:
-            out.append(HardNegative(text=text.replace(phrase, other, 1), kind="attribute_swap", source_ids=[a.scene_id], note=f"camera measured {mov}, negative claims {OPPOSITE_MOVEMENT[mov]}"))
+            out.append(HardNegative(text=text.replace(phrase, other, 1), kind="attribute_swap", source_ids=[a.scene_id], note=f"camera measured {mov}, negative claims {OPPOSITE_MOVEMENT[mov]}", verification_status="measured_difference", evidence_interval=[a.start_time, a.end_time]))
     level = a.measurements.lighting_level if a.measurements else None
     if level in OPPOSITE_LIGHTING and f"{level} lighting" in text:
         other_level = OPPOSITE_LIGHTING[level]
-        out.append(HardNegative(text=text.replace(f"{level} lighting", f"{other_level} lighting", 1), kind="attribute_swap", source_ids=[a.scene_id], note=f"lighting measured {level}, negative claims {other_level}"))
+        out.append(HardNegative(text=text.replace(f"{level} lighting", f"{other_level} lighting", 1), kind="attribute_swap", source_ids=[a.scene_id], note=f"lighting measured {level}, negative claims {other_level}", verification_status="measured_difference", evidence_interval=[a.start_time, a.end_time]))
     return out
 
 
@@ -198,5 +198,8 @@ def caption_hard_negatives(a: SceneAnalysis, others: list[SceneAnalysis], rng: r
     for _n, b, diffs in scored:
         if len(out) >= limit:
             break
-        out.append(HardNegative(text=b.summary or "", kind="other_shot", source_ids=[b.scene_id], note="; ".join(diffs)))
+        # a borrowed caption is wrong for this shot when a *measured* attribute (camera flow, lighting
+        # level, setting) differs; a difference only in the detected object list is weaker evidence
+        measured = any(d.startswith(("camera ", "lighting ", "setting ")) for d in diffs)
+        out.append(HardNegative(text=b.summary or "", kind="other_shot", source_ids=[b.scene_id], note="; ".join(diffs), verification_status="measured_difference" if measured else "unverified", evidence_interval=[a.start_time, a.end_time]))
     return out[:limit]

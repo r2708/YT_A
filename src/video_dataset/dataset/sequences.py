@@ -65,6 +65,12 @@ def _camera_label(rec: dict[str, Any]) -> str:
     return f"{fam}_{d}" if d else str(fam)
 
 
+def _shared(values: Any) -> str | None:
+    """The one value every shot agrees on, else None (a sequence is only as verified as its weakest shot)."""
+    vals = {v for v in values}
+    return vals.pop() if len(vals) == 1 and None not in vals else None
+
+
 def _worst_status(shots: list[dict[str, Any]]) -> str:
     statuses = [((s.get("validation") or {}).get("status")) or ValidationStatus.ACCEPTED.value for s in shots]
     return max(statuses, key=lambda st: _STATUS_ORDER.get(str(st), 1))
@@ -134,7 +140,13 @@ def _emit(video_id: str, shots: list[dict[str, Any]], reasons: list[str], clip_i
         "confidence": conf,
         "confidence_source": "derived_min" if conf is not None else "unavailable",
         "quality": _min_quality(shots),
-        "validation": {"status": status, "issues": [] if status == ValidationStatus.ACCEPTED.value else ["contains shots not accepted"], "checks": {"all_shots_accepted": status == ValidationStatus.ACCEPTED.value}},
+        "validation": {
+            "status": status, "issues": [] if status == ValidationStatus.ACCEPTED.value else ["contains shots not accepted"],
+            "checks": {"all_shots_accepted": status == ValidationStatus.ACCEPTED.value},
+            "policy_version": _shared((s.get("validation") or {}).get("policy_version") for s in shots),
+            "semantic_verification": _shared((s.get("validation") or {}).get("semantic_verification") for s in shots),
+            "reason_codes": [] if status == ValidationStatus.ACCEPTED.value else ["shots_not_accepted"],
+        },
     }
     return SequenceRecord.model_validate(rec).model_dump(mode="json")  # exactly the exported schema
 

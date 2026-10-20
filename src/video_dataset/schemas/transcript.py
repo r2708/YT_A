@@ -34,6 +34,10 @@ class Transcript(BaseSchema):
     language: str | None = None
     language_probability: float | None = None
     has_speech: bool = True
+    # transcribed: ASR ran (``segments`` may still be empty = no speech detected);
+    # no_audio: the source has no audio stream; not_run: transcription disabled / provider none;
+    # failed: the ASR stage crashed. Lets consumers tell "no speech" from "nobody listened".
+    status: str = "transcribed"
     segments: list[TranscriptSegment] = Field(default_factory=list)
 
     def text_between(self, start: float, end: float) -> str:

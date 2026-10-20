@@ -28,12 +28,13 @@ def transcription_stage(ctx: VideoContext) -> StageOutput:
 
     if not cfg.enabled or cfg.provider == "none" or not ctx.media_info.has_audio or not wav.exists():
         reason = "disabled" if (not cfg.enabled or cfg.provider == "none") else "no audio"
-        transcript = Transcript(video_id=ctx.video_id, provider="none", has_speech=False)
+        transcript = Transcript(video_id=ctx.video_id, provider="none", has_speech=False, status="not_run" if reason == "disabled" else "no_audio")
         write_json_atomic(out, transcript)
         return StageOutput(artifact_path=str(out), metrics={"segments": 0, "reason": reason}, message=f"skipped ({reason})", skipped=(reason == "disabled"))
 
     transcriber = ctx.get_model(f"asr:{cfg.provider}:{cfg.model}", lambda: create_transcriber(cfg, ctx.config.project.device))
     transcript = transcriber.transcribe(wav, ctx.video_id)
+    transcript.status = "transcribed"  # ASR ran; an empty segment list now really means "no speech detected"
     transcript = attach_scene_ids(transcript, scenes)
     write_json_atomic(out, transcript)
     words = sum(len(s.text.split()) for s in transcript.segments)

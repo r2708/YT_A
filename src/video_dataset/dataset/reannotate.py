@@ -23,7 +23,7 @@ from typing import Any
 
 from video_dataset.config import PipelineConfig
 from video_dataset.dataset.aggregate import _write_dataset_files
-from video_dataset.dataset.curation import annotate_records, split_manifest, subset_records, video_info_from_manifests
+from video_dataset.dataset.curation import annotate_records, rights_status_for, split_manifest, subset_records, video_info_from_manifests
 from video_dataset.dataset.export import (
     CINEMATIC_DIR,
     DATASET_FILES,
@@ -175,6 +175,10 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
     records = upgrade_records(records)
     neg_counts = rebuild_hard_negatives(records, int(config.export.hard_negatives_per_record), int(config.qa.seed), only_missing=False) if rebuild_negatives and config.export.hard_negatives else {}
     video_info = video_info_from_manifests(manifests, float(config.deduplication.video_similarity_threshold), bool(config.deduplication.video_fingerprint))
+    for m in manifests:
+        vi = video_info.setdefault(str(m.get("video_id")), {})
+        vi.setdefault("rights_status", m.get("rights_status") or rights_status_for(m.get("license_status")))
+        vi.setdefault("coverage", m.get("coverage") or {})
     curation = annotate_records(records, config.export, video_info, config.licensing, seed=int(config.qa.seed))
     splits = split_manifest(records)
 

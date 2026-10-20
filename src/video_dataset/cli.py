@@ -676,6 +676,125 @@ def verify_media_cmd(
         raise typer.Exit(1)
 
 
+@app.command("release-check")
+def release_check_cmd(
+    final_dir: Annotated[str | None, typer.Option("--final-dir", help="Dataset directory to check (default: data/final)")] = None,
+    require_media: Annotated[bool | None, typer.Option("--require-media/--no-require-media", help="Fail when referenced media is missing (default: upload.include_media)")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Print the full report as JSON")] = False,
+    config: ConfigOpt = None,
+    set_: SetOpt = None,
+) -> None:
+    """Run the release gates on an exported dataset: schema + timestamp invariants, cross-record
+    references, JSONL == Parquet ids, split leakage, media references, strict subset. Writes
+    final/release_report.json (with the quality metrics) and exits 1 when a gate fails."""
+    from video_dataset.dataset.release import format_report, run_release_check
+
+    _apply_local_options(config, set_)
+    cfg = _config()
+    try:
+        report = run_release_check(cfg, Path(final_dir) if final_dir else None, require_media=require_media)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    console.print(json.dumps(report, indent=2) if as_json else format_report(report))
+    console.print(f"report: {Path(report['final_dir']) / 'release_report.json'}")
+    if not report["ok"]:
+        raise typer.Exit(1)
+
+
+@app.command("review-queue")
+def review_queue_cmd(
+    final_dir: Annotated[str | None, typer.Option("--final-dir", help="Dataset directory (default: data/final)")] = None,
+    limit: Annotated[int | None, typer.Option("--limit", help="Maximum records to queue")] = None,
+    config: ConfigOpt = None,
+    set_: SetOpt = None,
+) -> None:
+    """Write final/review_queue.jsonl: every record a human should look at (review status, contradicted
+    claims, failed boundary checks, suspected missed cuts) with its evidence and an empty `label` slot.
+    Fill `label` (accept | reject | correct) and copy the rows to final/reviews/labels.jsonl; the next
+    `export` applies them and `calibrate` measures the scores against them."""
+    from video_dataset.dataset.release import load_final
+    from video_dataset.dataset.review import QUEUE_FILE, export_review_queue
+
+    _apply_local_options(config, set_)
+    cfg = _config()
+    final = Path(final_dir) if final_dir else cfg.export_dir
+    records = load_final(final)
+    if not any(records.values()):
+        console.print(f"no exported dataset under {final}; run `video-dataset export` first")
+        raise typer.Exit(1)
+    n = export_review_queue(records, final, limit)
+    console.print(f"{n} record(s) queued for review -> {final / QUEUE_FILE}")
+
+
+@app.command()
+def calibrate(
+    labels: Annotated[str | None, typer.Argument(help="CSV/JSONL with record_id + correct (default: final/reviews/labels.jsonl)")] = None,
+    final_dir: Annotated[str | None, typer.Option("--final-dir", help="Dataset directory (default: data/final)")] = None,
+    target_far: Annotated[float, typer.Option("--target-false-accept", help="False-accept rate the recommended thresholds must meet")] = 0.05,
+    config: ConfigOpt = None,
+    set_: SetOpt = None,
+) -> None:
+    """Measure confidence scores against human labels per confidence_source and record type (accuracy,
+    Brier, ECE, reliability bins, false-accept / false-reject at validation.minimum_confidence) and
+    recommend per-source thresholds. Writes final/calibration.json."""
+    from video_dataset.dataset.calibration import calibrate as _calibrate
+    from video_dataset.dataset.calibration import read_labels, write_calibration
+    from video_dataset.dataset.release import load_final
+    from video_dataset.dataset.review import LABELS_FILE, labels_for_calibration, read_review_labels
+
+    _apply_local_options(config, set_)
+    cfg = _config()
+    final = Path(final_dir) if final_dir else cfg.export_dir
+    if labels:
+        lab = read_labels(Path(labels))
+    else:
+        lab = labels_for_calibration(read_review_labels(final / LABELS_FILE))
+    if not lab:
+        console.print("no labels found; fill final/review_queue.jsonl (`review-queue`) and save it as final/reviews/labels.jsonl, or pass a CSV with record_id,correct")
+        raise typer.Exit(1)
+    report = _calibrate(load_final(final), lab, float(cfg.validation.minimum_confidence), float(target_far))
+    out = write_calibration(report, final / "calibration.json")
+    t = Table(title=f"calibration on {report['matched_records']} labelled records")
+    for col in ("source | type", "n", "accuracy", "brier", "ECE", "FAR@thr", "FRR@thr", "recommended thr"):
+        t.add_column(col)
+    for key, m in report["by_source"].items():
+        t.add_row(key, str(m["count"]), f"{m['accuracy']:.2f}", f"{m['brier']:.3f}", f"{m['ece']:.3f}", "-" if m["false_accept_rate_at_threshold"] is None else f"{m['false_accept_rate_at_threshold']:.2f}", "-" if m["false_reject_rate_at_threshold"] is None else f"{m['false_reject_rate_at_threshold']:.2f}", "-" if m["recommended_threshold"] is None else f"{m['recommended_threshold']:.2f}")
+    console.print(t)
+    console.print(f"written: {out}")
+
+
+@app.command("remove-source")
+def remove_source_cmd(
+    video_id: Annotated[str, typer.Argument(help="Video id to remove everywhere (takedown)")],
+    reason: Annotated[str | None, typer.Option("--reason", help="Why (stored in final/removed_sources.json)")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", "-n", help="Show what would be removed")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Do not ask for confirmation")] = False,
+    config: ConfigOpt = None,
+    set_: SetOpt = None,
+) -> None:
+    """Remove one source video from the working data, the per-video export, final/ and archived shards,
+    forget it in the state DB and record a tombstone so it is never re-exported. Shards already on the
+    Hub are listed; deleting there is a separate step."""
+    from video_dataset.dataset.takedown import remove_source
+
+    _apply_local_options(config, set_)
+    cfg = _config()
+    plan = remove_source(cfg, video_id, reason, dry_run=True)
+    console.print(f"{video_id}: {len(plan['working_paths'])} working path(s) ({plan['working_bytes'] / 1e6:.1f} MB), hub shards: {[s['shard'] for s in plan['hub_shards']] or 'none'}")
+    if dry_run:
+        console.print("[cyan]dry run: nothing removed[/cyan]")
+        return
+    if not yes and not typer.confirm("Remove this source everywhere locally?", default=False):
+        console.print("aborted")
+        raise typer.Exit(1)
+    result = remove_source(cfg, video_id, reason)
+    console.print(f"removed: final {result['final']}, archived shards {list(result['archived_shards']) or 'none'}")
+    if result["hub_shards"]:
+        console.print("[yellow]this source is in uploaded shards; delete it on the Hub too:[/yellow] " + ", ".join(f"{s['repo_id']}/{s['path_in_repo']}" for s in result["hub_shards"]))
+    console.print("run `video-dataset export` to rebuild the final files")
+
+
 @app.command("show-config")
 def show_config(config: ConfigOpt = None, set_: SetOpt = None) -> None:
     """Print the effective merged configuration."""

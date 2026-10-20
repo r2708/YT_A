@@ -35,7 +35,11 @@ def temporal_stage(ctx: VideoContext) -> StageOutput:
     audio = _load(ctx.paths.audio_events_file(ctx.video_id), AudioAnalysis)
     duration = ctx.duration
 
-    extractor = EventExtractor(cfg.temporal, scene_threshold=detection.threshold)
+    try:
+        source_fps: float | None = float(ctx.media_info.fps)
+    except FileNotFoundError:
+        source_fps = None
+    extractor = EventExtractor(cfg.temporal, scene_threshold=detection.threshold, source_fps=source_fps, track_fps=float(cfg.vision.track_fps) if getattr(cfg.vision, "tracking", False) else None)
     events = extractor.extract(ctx.video_id, duration, detection.scenes, sampling.frames, vision, transcript, ocr, audio, sampling.scans)
     relations = RelationBuilder(cfg.temporal).build(ctx.video_id, events)
 

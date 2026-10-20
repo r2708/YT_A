@@ -74,7 +74,7 @@ def frame_extraction_stage(ctx: VideoContext) -> StageOutput:
     if cfg.extract_clips:
         clips, clip_stats = extract_clips(
             ctx.video_path, ctx.video_id, scenes, frames, ctx.paths.clips_dir(ctx.video_id), cfg, info.has_audio,
-            ctx.config.project.ffmpeg_path, ctx.config.project.ffprobe_path, workers=workers,
+            ctx.config.project.ffmpeg_path, ctx.config.project.ffprobe_path, workers=workers, source_fps=info.fps,
         )
         clip_metrics = clip_stats.as_metrics()
         if clip_stats.reencoded:
