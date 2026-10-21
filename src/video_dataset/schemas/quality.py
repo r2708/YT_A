@@ -19,6 +19,8 @@ class QualityScore(BaseSchema):
     description_quality: float | None = Field(default=None, ge=0, le=1)
     overall: float | None = Field(default=None, ge=0, le=1)
     components_used: list[str] = Field(default_factory=list)
+    # Components that could not be measured for this record (never treated as 0 or as a pass).
+    missing_components: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
     @classmethod
@@ -43,8 +45,12 @@ class QualityScore(BaseSchema):
             description_quality=description_quality,
             overall=overall,
             components_used=used,
+            missing_components=[k for k in comps if k not in used],
             notes=notes or [],
         )
+
+
+QUALITY_COMPONENTS = ("grounding", "temporal_accuracy", "description_quality")
 
 
 class ValidationStatus(StrEnum):
@@ -99,3 +105,9 @@ class ValidationInfo(BaseSchema):
     # ``not_run`` (generated text that no verifier checked). A generative record whose semantic
     # verification is ``not_run`` can never be ``accepted``.
     semantic_verification: str | None = None
+    # Per-dimension summary filled at export (``policy.verification_summary``): temporal /
+    # measurement / semantic / human, each a check state (or the semantic source), so consumers can
+    # tell automated measurements, verifier judgements and human review apart.
+    verification: dict[str, str] = Field(default_factory=dict)
+    # "export" when the acceptance policy re-labelled this record at export time (``enforce_policy``)
+    reevaluated: str | None = None

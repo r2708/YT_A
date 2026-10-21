@@ -1,0 +1,40 @@
+# Export targets. "wan-*" targets write the documented generic JSONL layout; they are NOT a
+# verified native format of any Wan trainer - add a dedicated adapter after inspecting the trainer.
+
+exports:
+  version: null                  # null -> <UTC date>-<config hash>; set explicitly for a named release
+  targets:
+    canonical:
+      format: canonical-parquet
+      kind: canonical
+      packaging: reference
+      require_rights: false
+    wan-t2v:
+      format: generic-jsonl
+      kind: t2v
+      packaging: hardlink        # hardlink | copy | reference
+      video_dir: videos
+      data_file: data.jsonl
+      caption_field: caption_final
+      require_rights: true
+      min_duration_seconds: 1.0
+      max_duration_seconds: 30.0
+      resolution: { mode: any, width: null, height: null, aspect_tolerance: 0.05 }
+      fps_min: 8.0
+      include_splits: [train, validation, test]
+      notes: generic JSONL (video + caption); adapt per trainer
+    wan-i2v:
+      format: generic-jsonl
+      kind: i2v
+      packaging: hardlink
+      video_dir: videos
+      image_dir: images
+      data_file: data.jsonl
+      caption_field: caption_final
+      require_rights: true
+      min_duration_seconds: 1.0
+      max_duration_seconds: 30.0
+      resolution: { mode: any, width: null, height: null, aspect_tolerance: 0.05 }
+      fps_min: 8.0
+      include_splits: [train, validation, test]
+      notes: generic JSONL (start image + video + caption); adapt per trainer

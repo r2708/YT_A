@@ -1,0 +1,44 @@
+# Thresholds for media, caption, frame and duplicate checks. These are conservative starting
+# points - calibrate them on a reviewed sample of 200-500 clips (compare reports/summary.md with
+# the reviewers' verdicts) before trusting them for a release.
+
+media:
+  min_duration_seconds: 1.0
+  max_duration_seconds: 30.0
+  min_width: 256
+  min_height: 256
+  min_fps: 8.0
+  max_fps: 120.0
+  max_aspect_ratio: 3.0
+  sample_frames: 6               # frames decoded per clip for black / duplicate / fingerprint checks
+  black_mean_max: 16.0           # mean luminance (0..255) at or below which a frame is black
+  black_std_max: 6.0
+  max_black_fraction: 0.5        # failure line
+  review_black_fraction: 0.25    # needs_review line (a short fade-in below it stays passed)
+  review_duplicate_fraction: 0.5
+  duplicate_frame_hamming: 2
+  max_duplicate_fraction: 0.9    # every sampled frame identical -> frozen clip
+  metadata_tolerance_fraction: 0.1
+  duration_tolerance_seconds: 0.5
+
+captions:
+  min_chars: 20
+  max_chars: 1200
+  placeholder_patterns: ['\{[a-z_]+\}', '\bTODO\b', '\bN/A\b', '\blorem ipsum\b', '<[^>]+>']
+  template_residue_patterns: ['#[0-9a-fA-F]{6}', '\bCLIP classifies\b', '\bNo objects were detected\b', '\bdominant colou?rs?\b']
+  motion_terms: [pan, tilt, dolly, tracking, zoom, orbit, crane, handheld, moves, moving, walks, walking, runs, running, turns, rotates, drifts, flows, flies, drives, camera movement, motion, slowly, quickly]
+  language: null                 # "en" restricts to (mostly) ASCII-letter captions
+  max_duplicate_captions: 20
+
+frames:
+  start_timestamp_seconds: 0.0
+  first_usable_policy: first_non_black   # first_non_black | fixed
+  max_search_seconds: 2.0
+  format: png
+  consistency_hamming: 6
+
+dedup:
+  exact: true
+  perceptual: true
+  fingerprint_similarity: 0.85
+  action: review                 # review (flag) | exclude (drop near-duplicate candidates from approved exports)

@@ -62,3 +62,9 @@ benchmark.json
 
 # Model weights downloaded on first use (ultralytics writes them to the working directory)
 *.pt
+
+# dataset_factory derived data (raw copies, frames, manifests, exports, caches)
+data/factory/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

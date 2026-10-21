@@ -134,9 +134,11 @@ class FrameSamplingConfig(_Section):
     aspect_mode: str = "scale"  # scale (fit inside, keep aspect) | pad (letterbox to exactly WxH) | crop (centre-crop to exactly WxH)
     # Boundary verification: decode the clip's first / last frames and match them against source
     # frames around the requested boundaries (perceptual hash) to measure where the clip really
-    # starts and ends. copy: only stream-copied (keyframe-aligned) clips and clips of unknown origin;
-    # all: every clip; none: skip. Results land in Clip.actual_start / actual_end / boundary_check.
-    verify_clip_boundaries: str = "copy"
+    # starts and ends. all: every clip (default - a clip record claims exact boundaries, so every
+    # one is measured); copy: only stream-copied (keyframe-aligned) clips and clips of unknown origin;
+    # none: skip. Results land in Clip.actual_start / actual_end / boundary_check; the acceptance
+    # policy requires ``passed`` before a scene / clip / frame record can be accepted.
+    verify_clip_boundaries: str = "all"
     boundary_search_seconds: float = 1.0  # source window searched on each side of a boundary
     boundary_max_hamming: int = 14  # dHash distance above which no source frame counts as a match (-> error)
 
@@ -358,6 +360,13 @@ class LicensingConfig(_Section):
     # declared license is evidence, not proof: `declared_cc_by` means YouTube reported a CC-BY
     # license; `restricted` the standard license; `unknown` nothing usable; `removed` a takedown.
     release_rights: list[str] = Field(default_factory=lambda: ["declared_cc_by"])
+    # What the published licence covers. The pipeline code and the annotations / metadata the
+    # pipeline writes are the producer's own work; the source videos keep their own licence (recorded
+    # per video in provenance.jsonl) and redistributed media follows each video's rights_status.
+    # These strings are published verbatim in manifest.json["licenses"] and the dataset card.
+    code_license: str = "MIT"
+    annotation_license: str = "MIT"
+    media_policy: str = "per-video: only sources with rights_status in release_rights may be redistributed; everything else is metadata-only"
 
 
 class DeduplicationConfig(_Section):
@@ -375,13 +384,21 @@ class DeduplicationConfig(_Section):
 
 
 class SplitConfig(_Section):
-    """Deterministic train / validation / test assignment per *source video* (hash of the video id),
-    so no scene, clip, frame or question of one video ever lands in two splits."""
+    """Deterministic train / validation / test assignment per *source group* (a video and its
+    near-duplicates share one id), so no scene, clip, frame or question of one video ever lands in
+    two splits. The bucket comes from sha1(salt | group id); on top of the fractions, the eval
+    splits are topped up to ``min_validation_videos`` / ``min_test_videos`` with the lowest-hash
+    groups so a small export never ships an empty validation or test split (train always keeps at
+    least one group). The release gate fails when a split in ``required_splits`` is empty or below
+    its minimum."""
 
     enabled: bool = True
     validation_fraction: float = 0.05
     test_fraction: float = 0.05
     salt: str = "video-dataset-v1"  # change to reshuffle; keep fixed to keep the split stable across runs
+    min_validation_videos: int = 1  # source groups the validation split must hold (0 = fractions only)
+    min_test_videos: int = 1
+    required_splits: list[str] = Field(default_factory=lambda: ["train", "validation", "test"])  # splits that must be non-empty at release
 
 
 class TierConfig(_Section):
@@ -456,6 +473,14 @@ class ExportConfig(_Section):
     media_manifest: bool = True  # write final/media_manifest.jsonl (one row per referenced asset with existence + size)
     hash_media: bool = False  # also sha256 every referenced asset (slow on large sets)
     require_rights: bool = False  # true: only videos whose rights_status is in licensing.release_rights are exported
+    # Fail closed at export time too: an ``accepted`` record whose validation predates the current
+    # policy, or whose required checks are not all ``passed`` / ``not_applicable`` (a clip whose
+    # boundary check is ``not_run``, a scene without check states ...), is re-labelled ``review``
+    # with the missing / failed checks as reason codes. Human ``accept`` labels are never overridden.
+    enforce_policy: bool = True
+    # Minimum number of source videos an export must hold before `release-check` passes (0 disables).
+    # Thousands of clips from a handful of videos are not a general-purpose dataset.
+    min_source_videos: int = 50
 
 
 class UploadConfig(_Section):

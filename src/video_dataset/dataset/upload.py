@@ -67,7 +67,12 @@ class UploadState:
 
     @property
     def uploaded_videos(self) -> set[str]:
-        return {v for s in self.shards for v in s.get("videos", [])}
+        return {v for s in self.shards for v in (s.get("videos") if isinstance(s.get("videos"), list) else [])}
+
+    @property
+    def uploaded_video_count(self) -> int:
+        """Videos in every shard uploaded so far (older state files stored a count, newer ones ids)."""
+        return sum(len(v) if isinstance(v, list) else int(v or 0) for v in (s.get("videos") for s in self.shards))
 
 
 def shard_name(index: int) -> str:
@@ -320,8 +325,26 @@ fields only. Camera annotations use one vocabulary for every provider: `camera_m
 `camera_distance`, `stabilization`; `lens_type`, `focal_length_mm`, `depth_of_field` and
 `focus_type` are VLM estimates (`lens_confidence_source`) and stay null for measurement-only providers.
 
-Only public video metadata (title, channel, duration, license) is stored. Make sure you have the
-right to redistribute the source videos' derived data before sharing this dataset.
+`validation.status: accepted` means every required check of the acceptance policy passed (for
+clips: the first and last frames were located in the source video, `boundary_check: passed`);
+anything unverified is `review` with the missing checks in `validation.reason_codes`.
+`validation.verification` separates temporal, measurement, semantic and human verification; a null
+quality component is unmeasured, never zero (`quality.missing_components`). `manifest.json` carries
+the tier policy, the licence scopes and, per shard, the exact per-type record counts (empty types
+are listed in `empty_record_types` and ship as empty files).
+
+## Licensing and rights
+
+| scope | licence |
+|---|---|
+| pipeline code | {config.licensing.code_license} |
+| annotations and metadata written by the pipeline (captions, events, QA, measurements) | {config.licensing.annotation_license} |
+| source videos | each video keeps its own licence: `license`, `license_status`, `rights_status` and the URL are in `provenance.jsonl` |
+| redistributed media (frames, clips, transcripts, on-screen text) | {config.licensing.media_policy} |
+
+The annotation licence grants no rights to the underlying videos, audio, transcripts or on-screen
+text. Only public video metadata (title, channel, duration, license) is stored. Obtain permission
+from the rights holder before redistributing media, and seek legal review before commercial use.
 """
 
 
@@ -400,7 +423,8 @@ def check_and_upload(
     if getattr(cfg, "release_gate", True) and not dry_run:
         from video_dataset.dataset.release import run_release_check
 
-        report = run_release_check(config, final_dir, require_media=bool(cfg.include_media))
+        # the source-pool minimum is a property of the released dataset, not of one upload shard
+        report = run_release_check(config, final_dir, require_media=bool(cfg.include_media), already_released=UploadState.load(final_dir).uploaded_video_count)
         if not report["ok"]:
             raise UploadError(f"release gate failed ({', '.join(report['failed_gates'])}); see {final_dir / 'release_report.json'} - fix the data or set upload.release_gate=false")
 

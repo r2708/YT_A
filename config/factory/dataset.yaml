@@ -1,0 +1,64 @@
+# dataset_factory configuration (paths, source, mapping, rights, splits, provider).
+# quality_rules.yaml and export_targets.yaml beside this file are merged in. Override anything
+# with --set a.b.c=value. Secrets never go here: HF_TOKEN comes from the environment / .env.
+
+paths:
+  data_root: data/factory        # everything derived; may live outside the repo
+  raw_dir: raw                   # downloaded source records, immutable after ingest
+  assets_dir: assets
+  frames_dir: assets/frames      # extracted I2V starting frames
+  curated_dir: curated           # factory.sqlite (the canonical manifest) + splits.json
+  exports_dir: exports           # <target>/<version>/
+  reports_dir: reports
+  cache_dir: cache               # provider cache (captions.sqlite)
+  state_db: curated/factory.sqlite
+
+source:
+  kind: huggingface              # huggingface | local
+  repo_id: raj270898/youtube-video-dataset
+  revision: null
+  token_env: HF_TOKEN
+  record_types: [clips]          # only clip rows are video-caption candidates
+  shard_glob: "shard_*"
+  local_dir: null                # for kind: local - a final/ export or a directory of shards
+  media_root: null               # where clip_path (clips/<video_id>/clip_NNN.mp4) resolves, e.g. ../YT_A/data
+                                 # null: assets unavailable -> every record stays not_checked
+
+mapping:
+  caption_priority: [generation_prompt_original, caption_original, prompt_variants]
+  # aliases: canonical field -> source candidates, first present wins (defaults cover this dataset;
+  # add entries here when a source renames a field)
+
+rights:
+  status_map:                    # platform-declared licence -> rights status; nothing maps to cleared
+    declared_cc_by: review_required
+    creative_commons: review_required
+    standard: restricted
+    restricted: restricted
+    removed: restricted
+    unknown: review_required
+  evidence_file: null            # JSONL {"video_id": ..., "status": cleared|restricted|review_required, "evidence": "..."} (relative to data_root)
+  export_allowed: [cleared]
+  export_override: []            # e.g. [review_required] - loud warning + recorded in every release manifest
+
+splits:
+  validation_fraction: 0.05
+  test_fraction: 0.05
+  salt: dataset-factory-v1
+  min_validation_groups: 1
+  min_test_groups: 1
+  persist_file: splits.json
+
+provider:
+  name: none                     # none (offline, deterministic) | a registered adapter
+  model: null
+  template_version: caption-review-v1
+  max_calls: 0                   # hard budget per run; --max-calls overrides
+  cache: true
+  timeout_seconds: 60
+  retries: 2
+  settings: {}
+
+batch_size: 64
+offline: true                    # a provider other than none refuses to run while this is true
+log_level: INFO

@@ -56,6 +56,46 @@ STRICT_DIR = "strict"
 PROVENANCE_FILE = "provenance.jsonl"
 
 
+def licenses_block(config: PipelineConfig) -> dict[str, Any]:
+    """What each licence in the release covers, published verbatim in manifest.json and the card."""
+    lic = config.licensing
+    return {
+        "code": getattr(lic, "code_license", "MIT"),
+        "annotations_and_metadata": getattr(lic, "annotation_license", "MIT"),
+        "source_videos": "each source video keeps its own licence; see provenance.jsonl (url, license, license_status, rights_status)",
+        "media": getattr(lic, "media_policy", ""),
+        "release_rights": list(lic.release_rights or []),
+        "note": "the annotation licence grants no rights to the underlying videos, audio, transcripts or on-screen text; obtain permission from the rights holder before redistributing media",
+    }
+
+
+def tier_policy_block(config: PipelineConfig) -> dict[str, Any]:
+    """Minimum requirements of every tier, so `tier` is documented next to the data."""
+    t = config.export.tiers
+    return {
+        "accepted": f"validation.status accepted = every required check of the record type passed or is explicitly not applicable under acceptance policy {POLICY_VERSION} (clips: boundary_check passed); records that only carry a confidence threshold are review",
+        "gold": {"status": "accepted", "quality.overall_min": t.gold_min_overall, "requires_grounding_component": bool(t.gold_requires_grounding), "confidence_min": t.gold_min_confidence, "confidence_source": "verifier | measurement | asr_logprob | ocr_score | detector_score | interval_algebra | derived_min", "quality_flags": "none", "near_duplicate_video": False},
+        "silver": {"status": "accepted", "quality.overall_min": t.silver_min_overall, "note": "or a gold candidate blocked by one gold requirement (tier_reasons says which)"},
+        "bronze": {"status": "accepted with quality.overall below silver, or review / unscored", "note": "exported for inspection; not training material"},
+        "strict_subset": "accepted + every required check passed + semantic verification present + single/multi-shot generation target + not a near-duplicate",
+        "missing_scores": "a null quality component is unmeasured, never zero or a pass; quality.missing_components lists them",
+    }
+
+
+def splits_block(config: PipelineConfig, splits: dict[str, list[str]], groups: dict[str, str]) -> dict[str, Any]:
+    sp = config.export.split
+    return {
+        "method": "sha1(salt | source_group_id) buckets, eval splits topped up to the minimums with the lowest-hash groups; assigned per source group (video + near-duplicates), never per clip",
+        "salt": sp.salt,
+        "fractions": {"validation": sp.validation_fraction, "test": sp.test_fraction},
+        "minimums": {"validation": int(sp.min_validation_videos), "test": int(sp.min_test_videos)},
+        "required_splits": list(sp.required_splits or []),
+        "videos": splits,
+        "counts": {k: len(v) for k, v in splits.items()},
+        "groups": groups,
+    }
+
+
 def provenance_rows(manifests: list[dict[str, Any]], video_info: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """One row per source video: everything needed to audit or remove it later. No credentials, no
     commenter data; channel name is public metadata."""
@@ -153,7 +193,12 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
             manifest_path = vdir / "manifest.json"
             if not manifest_path.exists():
                 continue
-            manifests.append(read_json(manifest_path))
+            m = read_json(manifest_path)
+            files = {k: f"per_video/{vdir.name}/{k}.jsonl" for k in (m.get("counts") or {})}
+            if m.get("files") != files:  # exports written before 2026-10-20 stored absolute paths
+                m["files"] = files
+                write_json_atomic(manifest_path, m)
+            manifests.append(m)
             for name in DATASET_FILES:
                 f = vdir / f"{name}.jsonl"
                 if f.exists():
@@ -202,7 +247,7 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
 
     counts, combined_rows, typed_counts, parquet_rows = _write_dataset_files(records, final_dir, config)
     write_schema_file(final_dir / SCHEMA_FILE)
-    write_json_atomic(final_dir / SPLITS_FILE, {"salt": config.export.split.salt, "fractions": {"validation": config.export.split.validation_fraction, "test": config.export.split.test_fraction}, "videos": splits, "counts": {k: len(v) for k, v in splits.items()}, "groups": {str(m.get("video_id")): video_info.get(str(m.get("video_id")), {}).get("canonical_video_id") or str(m.get("video_id")) for m in manifests}})
+    write_json_atomic(final_dir / SPLITS_FILE, splits_block(config, splits, {str(m.get("video_id")): video_info.get(str(m.get("video_id")), {}).get("canonical_video_id") or str(m.get("video_id")) for m in manifests}))
     write_jsonl(final_dir / PROVENANCE_FILE, provenance_rows(manifests, video_info))
     media_summary = write_media_manifest(records, final_dir, config.data_dir, bool(getattr(config.export, "hash_media", False))) if getattr(config.export, "media_manifest", True) else {}
 
@@ -237,25 +282,33 @@ def aggregate_exports(config: PipelineConfig, db: StateDB, output_dir: Path | No
             "schema_version": SCHEMA_VERSION,
             "policy_version": POLICY_VERSION,
             "diversity": compute_diversity(records, manifests),
-            "files": {
-                **({name: str(final_dir / f"{name}.jsonl") for name in DATASET_FILES} if config.export.per_type_jsonl else {}),
-                **({f"{name}_parquet": str(final_dir / f"{name}.parquet") for name in DATASET_FILES if typed_counts.get(name)} if config.export.per_type_parquet else {}),
-                **({"dataset_jsonl": str(final_dir / COMBINED_FILE)} if config.export.combined_jsonl and "jsonl" in config.export.formats else {}),
-                **({"dataset_parquet": str(final_dir / "dataset.parquet")} if "parquet" in config.export.formats else {}),
-                "schemas": str(final_dir / SCHEMA_FILE),
-                "splits": str(final_dir / SPLITS_FILE),
-                **({"cinematic_dir": str(final_dir / CINEMATIC_DIR)} if cinematic_counts else {}),
-                **({"strict_dir": str(final_dir / STRICT_DIR)} if strict_counts else {}),
-                "provenance": str(final_dir / PROVENANCE_FILE),
+            "files": {  # relative to the export root, so the file is valid wherever the export lands
+                **({name: f"{name}.jsonl" for name in DATASET_FILES} if config.export.per_type_jsonl else {}),
+                **({f"{name}_parquet": f"{name}.parquet" for name in DATASET_FILES} if config.export.per_type_parquet else {}),
+                **({"dataset_jsonl": COMBINED_FILE} if config.export.combined_jsonl and "jsonl" in config.export.formats else {}),
+                **({"dataset_parquet": "dataset.parquet"} if "parquet" in config.export.formats else {}),
+                "schemas": SCHEMA_FILE,
+                "splits": SPLITS_FILE,
+                **({"cinematic_dir": CINEMATIC_DIR} if cinematic_counts else {}),
+                **({"strict_dir": STRICT_DIR} if strict_counts else {}),
+                "provenance": PROVENANCE_FILE,
             },
             "jsonl_counts": counts,
+            "empty_record_types": [name for name in DATASET_FILES if not counts.get(name)],
+            "licenses": licenses_block(config),
+            "tier_policy": tier_policy_block(config),
         },
     )
     write_json_atomic(final_dir / "statistics.json", stats)
+    for m in manifests:  # never publish the producer's directory layout
+        m["files"] = {k: f"per_video/{m.get('video_id')}/{k}.jsonl" for k in (m.get("counts") or {})}
     write_json_atomic(final_dir / "manifest.json", {
-        "videos": manifests, "counts": counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows,
+        "videos": manifests, "counts": counts, "typed_parquet_counts": typed_counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows,
+        "empty_record_types": [name for name in DATASET_FILES if not counts.get(name)],
         "splits": {k: len(v) for k, v in splits.items()}, "cinematic": cinematic_counts, "strict": strict_counts,
         "schema_version": SCHEMA_VERSION, "policy_version": POLICY_VERSION, "media_references": media_summary,
+        "licenses": licenses_block(config), "tier_policy": tier_policy_block(config),
+        "policy_downgraded": curation.get("policy_downgraded", 0),
         "removed_sources": sorted(removed), "environment": environment_manifest(config),
     })
     log.info("aggregated %d videos -> %s (splits %s, cinematic records %d)", len(manifests), final_dir, {k: len(v) for k, v in splits.items()}, curation.get("cinematic", 0))

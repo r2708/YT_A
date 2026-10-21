@@ -322,14 +322,22 @@ Data extracted using a comprehensive 12-stage pipeline:
 
 ## 📄 License & Usage
 
-This dataset is sourced from public YouTube videos and is released under the MIT License for research and educational purposes. Please respect original content licenses when using this dataset.
+The `license: mit` declaration above covers **only** the material produced by the pipeline: the
+pipeline code and the annotations / metadata it writes (captions, events, relations, questions,
+measurements, statistics). It grants **no rights** to the source videos or to anything derived from
+them.
 
-### Ethical Considerations
+| scope | licence / rights |
+|---|---|
+| pipeline code ([r2708/YT_A](https://github.com/r2708/YT_A)) | MIT |
+| annotations and metadata written by the pipeline | MIT |
+| source videos | each video keeps its own licence. `provenance.jsonl` (per shard) records the URL, the licence YouTube reported (`license`, `license_status`) and the derived `rights_status`: `declared_cc_by` (YouTube declared a Creative Commons Attribution licence), `restricted` (standard YouTube licence: viewable, not redistributable), `unknown`, `removed` (taken down on request) |
+| redistributed media (frames, clips) and derived text (transcripts, on-screen text) | follows the source video's rights. Only videos whose `rights_status` is in the producer's `release_rights` (`declared_cc_by`) may be redistributed; records of other videos are metadata-only and carry the `rights_<status>` subset |
 
-- All videos are publicly available on YouTube
-- No personal information or private data is included
-- Metadata includes video titles and URLs for attribution
-- Use responsibly for research and educational purposes
+`manifest.json["licenses"]` repeats these scopes next to the data. Process only videos you have the
+right to download and analyse; obtain permission from the rights holder before redistributing
+media, and seek legal review before any commercial distribution. Takedown requests are honoured
+with `video-dataset remove-source` (tombstones in `removed_sources.json`).
 
 ## 📚 Citation
 

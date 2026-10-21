@@ -78,6 +78,7 @@ def compute_statistics(
         "video_descriptions": len(records.get("video_descriptions", [])),
         "validation": agg,
         "exported_status_counts": {name: _status_counts(recs) for name, recs in records.items()},
+        "validation_report": validation_report(records),
         "videos_by_split": _split_videos(records),
         "records_by_split": {name: _field_counts(recs, "split") for name, recs in records.items()},
         "records_by_tier": {name: _field_counts(recs, "tier") for name, recs in records.items()},
@@ -98,6 +99,36 @@ def compute_statistics(
     if extra:
         stats.update(extra)
     return stats
+
+
+def validation_report(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Per record type: share of accepted / review / rejected records, how many lack each quality
+    component (null = unmeasured, never zero), what was verified (temporal / measurement / semantic /
+    human) and how many accepted records were re-labelled review by the export-time policy."""
+    out: dict[str, Any] = {}
+    for name, rows in records.items():
+        rows = [r for r in rows if isinstance(r, dict)]
+        if not rows:
+            continue
+        n = len(rows)
+        status = _status_counts(rows)
+        missing = {comp: sum(1 for r in rows if (r.get("quality") or {}).get(comp) is None) for comp in ("grounding", "temporal_accuracy", "description_quality")}
+        verification: dict[str, dict[str, int]] = {}
+        for r in rows:
+            for dim, st in (((r.get("validation") or {}).get("verification")) or {}).items():
+                verification.setdefault(dim, {})[str(st)] = verification.setdefault(dim, {}).get(str(st), 0) + 1
+        out[name] = {
+            "records": n,
+            "status": status,
+            "status_pct": {k: round(100.0 * v / n, 1) for k, v in status.items()},
+            "quality_missing": missing,
+            "quality_missing_pct": {k: round(100.0 * v / n, 1) for k, v in missing.items()},
+            "quality_unscored": sum(1 for r in rows if (r.get("quality") or {}).get("overall") is None),
+            "verification": verification,
+            "policy_downgraded_at_export": sum(1 for r in rows if (r.get("validation") or {}).get("reevaluated")),
+            "human_labelled": sum(1 for r in rows if "human:accepted" in ((r.get("validation") or {}).get("reason_codes") or []) or "human:rejected" in ((r.get("validation") or {}).get("reason_codes") or [])),
+        }
+    return out
 
 
 def _negative_stats(records: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:

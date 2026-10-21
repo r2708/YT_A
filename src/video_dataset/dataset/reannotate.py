@@ -22,8 +22,19 @@ from pathlib import Path
 from typing import Any
 
 from video_dataset.config import PipelineConfig
-from video_dataset.dataset.aggregate import _write_dataset_files
-from video_dataset.dataset.curation import annotate_records, rights_status_for, split_manifest, subset_records, video_info_from_manifests
+from video_dataset.dataset.aggregate import (
+    _write_dataset_files,
+    licenses_block,
+    splits_block,
+    tier_policy_block,
+)
+from video_dataset.dataset.curation import (
+    annotate_records,
+    rights_status_for,
+    split_manifest,
+    subset_records,
+    video_info_from_manifests,
+)
 from video_dataset.dataset.export import (
     CINEMATIC_DIR,
     DATASET_FILES,
@@ -35,11 +46,13 @@ from video_dataset.dataset.export import (
 )
 from video_dataset.dataset.negatives import caption_hard_negatives, qa_hard_negatives
 from video_dataset.dataset.stats import compute_diversity, compute_statistics
+from video_dataset.schemas.common import SCHEMA_VERSION
 from video_dataset.schemas.events import Event
 from video_dataset.schemas.qa import QARecord
 from video_dataset.schemas.vision import ObjectAnnotation, SceneAnalysis
 from video_dataset.utils.io import read_json, read_jsonl, write_json_atomic
 from video_dataset.utils.logging import get_logger
+from video_dataset.validation.policy import POLICY_VERSION
 
 log = get_logger("dataset.reannotate")
 
@@ -184,7 +197,7 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
 
     counts, combined_rows, typed_counts, parquet_rows = _write_dataset_files(records, out, config)
     write_schema_file(out / SCHEMA_FILE)
-    write_json_atomic(out / SPLITS_FILE, {"salt": config.export.split.salt, "fractions": {"validation": config.export.split.validation_fraction, "test": config.export.split.test_fraction}, "videos": splits, "counts": {k: len(v) for k, v in splits.items()}})
+    write_json_atomic(out / SPLITS_FILE, splits_block(config, splits, {vid: (video_info.get(vid, {}).get("canonical_video_id") or vid) for vid in {str(r.get("video_id")) for rows in records.values() for r in rows if r.get("video_id")}}))
     cinematic_counts: dict[str, int] = {}
     if config.export.cinematic.enabled and config.export.cinematic.write_files:
         cinematic_counts, _c, _t, _p = _write_dataset_files(subset_records(records, "cinematic"), out / CINEMATIC_DIR, config)
@@ -203,7 +216,7 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
         else:
             vcounts = {n: len(r) for n, r in rows.items()}
         m = dict(manifest_by_video.get(vid) or {"video_id": vid})
-        m.update({"counts": vcounts, "split": next((r.get("split") for rs in rows.values() for r in rs if r.get("split")), None), "reannotated": True})
+        m.update({"counts": vcounts, "split": next((r.get("split") for rs in rows.values() for r in rs if r.get("split")), None), "reannotated": True, "files": {k: f"per_video/{vid}/{k}.jsonl" for k in vcounts}})
         if (out / "per_video" / vid).exists():
             write_json_atomic(vdir / "manifest.json", m)
         new_manifests.append(m)
@@ -212,10 +225,16 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
     stats = compute_statistics(videos, records, [m.get("validation_summary", {}) for m in new_manifests], extra={
         "reannotated": True, "typed_parquet_counts": typed_counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows,
         "cinematic": {**curation, "files": cinematic_counts}, "curation": curation, "hard_negatives_rebuilt": neg_counts, "jsonl_counts": counts,
-        "diversity": compute_diversity(records, new_manifests),
+        "empty_record_types": [name for name in DATASET_FILES if not counts.get(name)],
+        "diversity": compute_diversity(records, new_manifests), "licenses": licenses_block(config), "tier_policy": tier_policy_block(config),
     })
     write_json_atomic(out / "statistics.json", stats)
-    write_json_atomic(out / "manifest.json", {"videos": new_manifests, "counts": counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows, "splits": {k: len(v) for k, v in splits.items()}, "cinematic": cinematic_counts, "reannotated": True})
+    write_json_atomic(out / "manifest.json", {
+        "videos": new_manifests, "counts": counts, "typed_parquet_counts": typed_counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows,
+        "empty_record_types": [name for name in DATASET_FILES if not counts.get(name)], "splits": {k: len(v) for k, v in splits.items()}, "cinematic": cinematic_counts,
+        "schema_version": SCHEMA_VERSION, "policy_version": POLICY_VERSION, "licenses": licenses_block(config), "tier_policy": tier_policy_block(config),
+        "policy_downgraded": curation.get("policy_downgraded", 0), "reannotated": True,
+    })
     summary = {
         "shard": str(shard_dir), "output": str(out), "videos": len(by_video), "records_in": n_in, "records_out": sum(counts.values()),
         "splits": {k: len(v) for k, v in splits.items()}, "tiers": stats.get("records_by_tier", {}).get("scenes", {}),

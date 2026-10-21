@@ -600,7 +600,11 @@ The policy fails closed: a required check that did not run is a reason for `revi
 | Strict subset | EXPORT | `subsets: ["strict"]` + `final/strict/`: accepted records whose required checks all passed, semantic verification present, single-shot generation targets, no near-duplicate videos (`export.strict`) |
 | Media manifest | EXPORT | `final/media_manifest.jsonl`: one row per referenced frame / clip with `exists`, `size_bytes`, optional `sha256` (`export.hash_media`); `statistics.json["media_references"]` |
 | Provenance / reproducibility | EXPORT | `final/provenance.jsonl` (url, platform id, channel, retrieval time, license, rights, source sha256, canonical id, coverage) and `environment` in every manifest (code commit, python, platform, ffmpeg, package versions, model identifiers, per-section config hashes; no secrets). `pipeline.rerun_on_config_change` re-runs stages whose config changed |
-| Release gates | `video-dataset release-check`, before every upload (`upload.release_gate`) | schema + timestamp invariants, cross-record references, JSONL == Parquet ids, split leakage (per video and per `source_group_id`), media references (required when `upload.include_media`), strict subset; `final/release_report.json` also carries status / reason-code / coverage / claim / boundary / rights distributions |
+| Release gates | `video-dataset release-check`, before every upload (`upload.release_gate`) | schema + timestamp invariants, cross-record references, JSONL == Parquet ids, reconciled counts (JSONL, Parquet footers, `manifest.json`, `statistics.json`, `splits.json`), required non-empty splits (`export.split.required_splits` + minimums), source pool (`export.min_source_videos`), split leakage (per video and per `source_group_id`), media references (required when `upload.include_media`), portable paths (no `/Users/`, `/home/`, drive letters anywhere published), accepted == verified (policy version, required checks, clip `boundary_check: passed`), strict subset; `final/release_report.json` also carries status percentages, verification / quality-missing distributions, reason codes, coverage, claims, boundaries, rights |
+| Export-time policy | EXPORT / `reannotate` (`export.enforce_policy`) | an `accepted` record whose validation predates the policy or whose required checks are not all passed (a clip with `boundary_check` other than `passed`) is re-labelled `review` with the missing checks as reason codes and `validation.reevaluated: export`; human `accept` labels stay. `validation.verification` (temporal / measurement / semantic / human) and `quality.missing_components` are filled on every record; `manifest.json` publishes `tier_policy` and `licenses` |
+| Splits | EXPORT (`export.split`) | sha1(salt \| `source_group_id`) buckets per source group, eval splits topped up to `min_validation_videos` / `min_test_videos` with the lowest-hash groups so no export ships an empty validation or test split; `splits.json` records the method and minimums |
+| Hub re-annotation | `scripts/hf_reannotate_all.py` | download -> re-annotate (current schema, export-time policy) -> gate -> push -> delete locally, one shard per child process (8 GB safe), done markers for resume, `--source-dir` for shards already on disk, `--clean-root` for the stale root files |
+| Hub consistency | `scripts/hf_verify_counts.py` | per shard: Parquet footer rows == manifest == statistics; across shards: sums == viewer configs; lists files outside the shards (removed by `scripts/hf_replace_shards.py --clean-root`) |
 | Human review loop | `video-dataset review-queue`, `calibrate` | `final/review_queue.jsonl` (records needing a human, with evidence); labels in `final/reviews/labels.jsonl` are applied at the next export (`semantic_verification: human`) and feed `calibrate`, which reports accuracy / Brier / ECE / false-accept per `confidence_source` and recommends per-source thresholds (`final/calibration.json`) |
 | Takedown | `video-dataset remove-source VIDEO_ID` | removes working files, per-video export, records in `final/` and archived shards, forgets the state and writes a tombstone (`final/removed_sources.json`) so the source is never re-exported; Hub shards are listed for manual deletion |
 
@@ -974,6 +978,29 @@ rm -rf data/frames/vid_XXXX data/clips/vid_XXXX      # same as clean vid_XXXX --
 | CUDA out of memory | lower `vision.max_images_per_request` / `image_max_side`, use a smaller model, or set `vision.torch_dtype: float16` |
 | Everything is `review` | with the heuristic provider generative descriptions do not exist, so QA built on speech/OCR/measured events is scored by their signals; add a verifier-capable vision provider (`vlm`/`composite`) to raise confidence |
 | Re-run a stage with new settings | `video-dataset run urls.txt --force-from QA_GENERATION` |
+
+## Dataset factory (T2V / I2V curation)
+
+`src/dataset_factory/` turns the exported clip records into verified **Text-to-Video** and
+**Image-to-Video** training sets: one canonical, versioned manifest (SQLite + Parquet/JSONL) and two
+independent approved exports. Offline by default, one clip at a time, source records and media are
+never modified. Full documentation: [`src/dataset_factory/README.md`](src/dataset_factory/README.md).
+
+```bash
+python -m dataset_factory inspect                                   # Hub audit -> reports/source_audit.md
+python -m dataset_factory ingest --source-dir data/final --set source.media_root=data
+python -m dataset_factory validate && python -m dataset_factory extract-frames
+python -m dataset_factory captions review && python -m dataset_factory deduplicate
+python -m dataset_factory curate && python -m dataset_factory report
+python -m dataset_factory export --target wan-t2v     # also: wan-i2v, canonical
+```
+
+Key facts (measured 2026-10-21): the Hub repository holds 44,190 clip records and **no media**;
+`clip_path` resolves only on a machine that still has `data/clips/` (`source.media_root`). The
+repository licence covers annotations only: 319 of 326 source videos are standard-licence
+(`restricted`), 7 declare Creative Commons (`review_required` until evidence is supplied), so
+approved exports are empty until rights evidence (`rights.evidence_file`) exists. Config:
+`config/factory/{dataset,quality_rules,export_targets}.yaml`. Tests: `tests/factory/`.
 
 ## Development
 

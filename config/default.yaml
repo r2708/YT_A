@@ -83,8 +83,10 @@ frame_sampling:
   target_height: null      # e.g. 480
   target_width: null       # e.g. 854 (with target_height; aspect_mode decides how the source is fitted)
   aspect_mode: scale       # scale (fit inside, keep aspect) | pad (letterbox to WxH) | crop (centre-crop to WxH)
-  verify_clip_boundaries: copy  # copy (stream-copied / unknown-origin clips) | all | none - decode the clip's first and
-                                # last frames and locate them in the source (perceptual hash) -> actual_start / actual_end
+  verify_clip_boundaries: all   # all (every clip - a clip record claims exact boundaries, so every one is measured) |
+                                # copy (stream-copied / unknown-origin clips only) | none - decode the clip's first and
+                                # last frames and locate them in the source (perceptual hash) -> actual_start / actual_end;
+                                # the acceptance policy needs boundary_check: passed before a clip / scene is accepted
   boundary_search_seconds: 1.0  # source window searched around each requested boundary
   boundary_max_hamming: 14      # no source frame within this dHash distance -> boundary_check: error (never a guess)
 
@@ -260,6 +262,9 @@ licensing:
   action: flag             # flag: record license_status + "licensed" subset | reject: skip downloading other videos
   subset: true
   release_rights: [declared_cc_by]  # rights_status values allowed in a release that requires verified rights
+  code_license: MIT        # published in manifest.json["licenses"] + the dataset card: what each licence covers
+  annotation_license: MIT  # the pipeline's own annotations / metadata; source videos keep their own licence (provenance.jsonl)
+  media_policy: "per-video: only sources with rights_status in release_rights may be redistributed; everything else is metadata-only"
 
 deduplication:
   enabled: true
@@ -284,11 +289,14 @@ export:
   merge_existing: true     # rebuilding final/ keeps records of earlier videos whose per_video/ export is gone
   hard_negatives: true     # rule-built wrong answers (QA) and wrong captions (scenes, clips) for contrastive training
   hard_negatives_per_record: 3
-  split:                   # train / validation / test by hash of the source video id (no leakage across scenes)
+  split:                   # train / validation / test by hash of the source group id (video + its near-duplicates; no leakage)
     enabled: true
     validation_fraction: 0.05
     test_fraction: 0.05
     salt: video-dataset-v1 # keep fixed to keep the split stable; change to reshuffle
+    min_validation_videos: 1  # eval splits are topped up with the lowest-hash groups to these minimums
+    min_test_videos: 1        # (train always keeps >= 1 group); 0 = fractions only
+    required_splits: [train, validation, test]  # release-check fails when one of these is empty / below its minimum
   tiers:                   # gold / silver / bronze from measured signals only
     enabled: true
     gold_min_overall: 0.8
@@ -325,6 +333,9 @@ export:
   media_manifest: true     # final/media_manifest.jsonl: one row per referenced frame / clip with existence + size
   hash_media: false        # also sha256 every referenced asset (slow)
   require_rights: false    # true: only videos whose rights_status is in licensing.release_rights are exported
+  enforce_policy: true     # accepted records whose required checks did not all pass (boundary not_run, no check states,
+                           # validated before the policy existed) are re-labelled review at export; human accepts stay
+  min_source_videos: 50    # release-check fails below this many source videos (0 disables)
 
 upload:
   provider: huggingface    # none | huggingface - upload final/ automatically once it reaches threshold_mb

@@ -52,7 +52,7 @@ from video_dataset.vision.subject_motion import (
     scale_class,
 )
 
-CFG = load_config().export
+CFG = load_config(None, {"export.enforce_policy": "false"}).export  # hand-made records carry no check states; enforcement has its own tests
 
 
 # ------------------------------------------------------------------------------------ split

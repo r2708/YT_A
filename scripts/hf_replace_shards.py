@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Replace every shard on the Hugging Face Hub with its re-annotated version (schema 2.1.0).
+"""Replace every shard on the Hugging Face Hub with its re-annotated version (current schema).
 
     .venv/bin/python scripts/hf_replace_shards.py --dry-run        # list shards + stale root files, change nothing
     .venv/bin/python scripts/hf_replace_shards.py --no-push        # download + re-annotate + gate only
@@ -13,9 +13,13 @@ What happens, in order:
 2. each one is upgraded and re-annotated into ``<work-dir>/rewritten/<shard>`` (current schema,
    split / tier / subsets / source groups / strict subset / hard negatives / typed Parquet);
 3. the release gates run on every rewritten shard (schema + timestamps, cross-record references,
-   JSONL == Parquet ids, split leakage, strict subset) and the Parquet schema of every record
+   JSONL == Parquet ids, reconciled counts, non-empty validation / test splits, source pool,
+   portable paths, accepted == verified, strict subset) and the Parquet schema of every record
    type is compared across shards - **nothing is pushed unless every shard passes**, so the Hub
-   never ends up with mixed schemas;
+   never ends up with mixed schemas. Re-annotation applies the acceptance policy at export
+   (``export.enforce_policy``): legacy ``accepted`` records without check states or without a
+   passed clip boundary check become ``review`` (bronze) with the missing checks named - the
+   only way back to ``accepted`` is reprocessing the video;
 4. each shard is pushed back to its folder in small commits; files the old shard had that the new
    one no longer produces are deleted in a final commit (media under ``frames/`` / ``clips/`` is
    kept unless ``--delete-media``), so the folder really is replaced, not merged;
@@ -23,6 +27,9 @@ What happens, in order:
    ``*.parquet`` / ``per_video`` / ``cinematic`` / ``manifest.json`` ...) are removed; ``README.md``
    and ``.gitattributes`` are never touched;
 6. the dataset card's loader ``configs:`` block is refreshed.
+
+Afterwards run ``scripts/hf_verify_counts.py``: it reconciles every shard's Parquet row counts
+with its manifest / statistics and with what the viewer reports, and lists leftover root files.
 
 HF_TOKEN (a *write* token) is read from the environment or ``.env``. The script refuses to run
 beside a live ``video-dataset run`` (``data/run.lock``): re-annotation loads whole shards into
@@ -89,7 +96,9 @@ def _push_replace(api, cfg, local_dir: Path, path_in_repo: str, *, delete_media:
     existing = [f for f in api.list_repo_files(cfg.repo_id, repo_type=cfg.repo_type) if f.startswith(path_in_repo + "/")]
     stale = [f for f in existing if f not in new_paths and (delete_media or not any(part in ("frames", "clips") for part in f[len(path_in_repo) + 1 :].split("/")))]
     chunks = [files[i : i + files_per_commit] for i in range(0, len(files), files_per_commit)]
-    base = f"Replace {Path(path_in_repo).name}: schema 2.1.0 re-annotation (policy checks, source groups, strict subset, typed Parquet)"
+    from video_dataset.schemas.common import SCHEMA_VERSION
+
+    base = f"Replace {Path(path_in_repo).name}: schema {SCHEMA_VERSION} re-annotation (policy enforced at export, source groups, strict subset, typed Parquet)"
     last = ""
     for n, chunk in enumerate(chunks, start=1):
         ops = [CommitOperationAdd(path_in_repo=f"{path_in_repo}/{p.relative_to(local_dir).as_posix()}", path_or_fileobj=str(p)) for p in chunk]
@@ -229,6 +238,7 @@ def main() -> int:
         print(f"removed {work}")
     print(f"\ndone in {(time.time() - t0) / 60:.1f} min")
     print(f"dataset: https://huggingface.co/datasets/{cfg.upload.repo_id}\nviewer:  https://huggingface.co/datasets/{cfg.upload.repo_id}/viewer (rebuilds a few minutes after the last commit)")
+    print("verify:  .venv/bin/python scripts/hf_verify_counts.py   (once the viewer has rebuilt)")
     return 0
 
 

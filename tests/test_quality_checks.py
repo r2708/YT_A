@@ -236,7 +236,7 @@ def test_sequences_join_split_parts_and_compatible_cuts_only(tmp_path: Path):
 
 
 def test_annotate_records_builds_sequences_prompts_variants_and_duplicate_aware_splits(tmp_path: Path):
-    cfg = _cfg(tmp_path, **{"export.prompt_variants": "3"})
+    cfg = _cfg(tmp_path, **{"export.prompt_variants": "3", "export.enforce_policy": "false"})  # hand-made records carry no check states
     scenes = [_scene_rec(1, 0.0, 10.0, "start"), _scene_rec(2, 10.0, 20.0, "cut")]
     dup = [_scene_rec(1, 0.0, 10.0, "start", video_id="vid_w", record_id="scene_w_001")]
     records = {"scenes": scenes + dup, "clips": [], "frames": [], "events": [], "temporal_qa": [], "long_video_qa": [], "video_descriptions": []}

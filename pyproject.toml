@@ -47,6 +47,7 @@ all = [
 
 [project.scripts]
 video-dataset = "video_dataset.cli:app"
+dataset-factory = "dataset_factory.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

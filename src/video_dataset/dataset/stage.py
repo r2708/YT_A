@@ -98,7 +98,7 @@ def export_stage(ctx: VideoContext) -> StageOutput:
         "transcript_status": getattr(transcript, "status", None) if transcript else "not_run",
         "ocr_tracks": len(ocr.tracks) if ocr else 0,
         "coverage": coverage,
-        "files": {k: str(out_dir / f"{k}.jsonl") for k in counts},
+        "files": {k: f"per_video/{ctx.video_id}/{k}.jsonl" for k in counts},  # relative to the export root: portable
         # video-level facts the aggregation needs without the working files
         "license": ctx.metadata.license,
         "license_status": ctx.metadata.license_status,

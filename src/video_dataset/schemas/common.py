@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Version of the exported record schemas. Bump the minor part whenever a field is added, the major
 # part whenever a field changes meaning or is removed; every exported record and manifest carries it.
-SCHEMA_VERSION = "2.1.0"
+SCHEMA_VERSION = "2.2.0"
 
 
 class StrEnum(str, Enum):

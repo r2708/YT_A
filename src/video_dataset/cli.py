@@ -681,18 +681,20 @@ def release_check_cmd(
     final_dir: Annotated[str | None, typer.Option("--final-dir", help="Dataset directory to check (default: data/final)")] = None,
     require_media: Annotated[bool | None, typer.Option("--require-media/--no-require-media", help="Fail when referenced media is missing (default: upload.include_media)")] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Print the full report as JSON")] = False,
+    already_released: Annotated[int | None, typer.Option("--already-released", help="Videos in shards released earlier, counted toward export.min_source_videos (default: read from final/uploads.json)")] = None,
     config: ConfigOpt = None,
     set_: SetOpt = None,
 ) -> None:
     """Run the release gates on an exported dataset: schema + timestamp invariants, cross-record
-    references, JSONL == Parquet ids, split leakage, media references, strict subset. Writes
+    references, JSONL == Parquet ids, reconciled counts, required splits, source pool, split
+    leakage, media references, strict subset, portable paths, accepted == verified. Writes
     final/release_report.json (with the quality metrics) and exits 1 when a gate fails."""
     from video_dataset.dataset.release import format_report, run_release_check
 
     _apply_local_options(config, set_)
     cfg = _config()
     try:
-        report = run_release_check(cfg, Path(final_dir) if final_dir else None, require_media=require_media)
+        report = run_release_check(cfg, Path(final_dir) if final_dir else None, require_media=require_media, already_released=already_released)
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from None

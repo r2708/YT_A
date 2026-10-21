@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import sys
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -76,7 +78,7 @@ def test_rebuild_hard_negatives_from_exported_records(tmp_path: Path):
 
 def test_reannotate_shard_rewrites_everything_into_the_output_dir(tmp_path: Path):
     shard = _legacy_shard(tmp_path)
-    cfg = load_config(None, {"project.data_dir": str(tmp_path / "data")})
+    cfg = load_config(None, {"project.data_dir": str(tmp_path / "data"), "export.enforce_policy": "false"})
     out = tmp_path / "out"
     summary = reannotate_shard(shard, cfg, out)
     assert summary["videos"] == 1 and summary["records_in"] == 14 and summary["records_out"] == 14
@@ -99,6 +101,30 @@ def test_reannotate_shard_rewrites_everything_into_the_output_dir(tmp_path: Path
     # in place: a second run on the output is idempotent
     again = reannotate_shard(out, cfg)
     assert again["records_out"] == 14 and list(read_jsonl(out / "scenes.jsonl")) == rows
+
+
+def test_reannotate_fails_closed_on_legacy_accepted_records(tmp_path: Path):
+    """Legacy records were `accepted` without check states or a boundary check: under the export-time
+    policy they are review (bronze) with the missing checks named, never silently accepted."""
+    shard = _legacy_shard(tmp_path)
+    cfg = load_config(None, {"project.data_dir": str(tmp_path / "data")})  # enforce_policy defaults to true
+    out = tmp_path / "out"
+    summary = reannotate_shard(shard, cfg, out)
+    assert summary["records_out"] == 14
+    for name in ("scenes", "clips", "events", "temporal_qa"):
+        for r in read_jsonl(out / f"{name}.jsonl"):
+            v = r["validation"]
+            assert v["status"] in ("review", "rejected"), (name, r["record_id"], v)
+            assert r["tier"] == "bronze" and "strict" not in r["subsets"]
+            if v.get("reevaluated"):
+                assert v["reevaluated"] == "export" and v["policy_version"] and "policy_version:missing" in v["reason_codes"]
+                assert v["verification"]["human"] == "not_run"
+    clips = list(read_jsonl(out / "clips.jsonl"))
+    assert all("missing_check:clip_boundaries" in c["validation"]["reason_codes"] and c["validation"]["verification"]["temporal"] == "not_run" for c in clips)
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["policy_downgraded"] == 13 and manifest["licenses"]["annotations_and_metadata"] and manifest["tier_policy"]["gold"]
+    assert manifest["videos"][0]["files"]["scenes"] == "per_video/vid_v/scenes.jsonl"
+    assert manifest["empty_record_types"] == ["frames", "sequences", "long_video_qa", "video_descriptions"]
 
 
 def test_push_shard_uploads_in_small_commits_and_retries(tmp_path: Path, monkeypatch):
@@ -132,3 +158,87 @@ def test_push_shard_uploads_in_small_commits_and_retries(tmp_path: Path, monkeyp
     uploaded = [p for c in api.commits for p in c]
     assert len(uploaded) == len(files) and all(p.startswith("shard_0001/") for p in uploaded)
     assert "shard_0001/scenes.parquet" in uploaded and any(p.startswith("shard_0001/per_video/vid_v/") for p in uploaded)
+
+
+def test_hf_reannotate_all_worker_rewrites_gates_and_reports(tmp_path: Path, monkeypatch):
+    """The per-shard child of scripts/hf_reannotate_all.py: download (patched to a local copy),
+    re-annotate to the current schema, gate, write the status file the parent reads."""
+    import importlib.util
+    import shutil
+
+    from video_dataset.dataset import reannotate as mod
+
+    spec = importlib.util.spec_from_file_location("hf_reannotate_all", Path(__file__).resolve().parents[1] / "scripts" / "hf_reannotate_all.py")
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    src = _legacy_shard(tmp_path / "src")
+    work = tmp_path / "work"
+
+    def fake_download(config, path_in_repo, dest, token):
+        local = dest / path_in_repo
+        shutil.copytree(src, local, dirs_exist_ok=True)
+        return local
+
+    monkeypatch.setattr(mod, "download_shard", fake_download)
+    overrides = {"project.data_dir": str(tmp_path / "data"), "export.min_source_videos": "0", "export.split.required_splits": "[train]"}
+    rc = script.worker("shard_0001", work, overrides, rebuild_negatives=True)
+    status = json.loads((work / "status" / "shard_0001.json").read_text())
+    assert rc == 0 and status["ok"] and status["failed_gates"] == [] and status["schema_mismatch"] == []
+    out = Path(status["rewritten"])
+    assert status["videos"] == 1 and status["records"] == 14 and (out / "release_report.json").exists()
+    rows = list(read_jsonl(out / "clips.jsonl"))
+    assert all(r["schema_version"] == status["schema_version"] and r["validation"]["status"] == "review" and "missing_check:clip_boundaries" in r["validation"]["reason_codes"] for r in rows)
+    manifest = json.loads((out / "per_video" / "vid_v" / "manifest.json").read_text())
+    assert manifest["files"]["clips"] == "per_video/vid_v/clips.jsonl"
+    # the status file lives outside the shard so it is never pushed
+    assert not any(p.name.endswith("shard_0001.json") for p in mod.shard_files(out))
+    # a gate failure is reported, not hidden: the 50-video pool minimum
+    rc = script.worker("shard_0001", work, {"project.data_dir": str(tmp_path / "data")}, rebuild_negatives=False)
+    status = json.loads((work / "status" / "shard_0001.json").read_text())
+    assert rc == 2 and not status["ok"] and "source_pool" in status["failed_gates"]
+
+
+def test_hf_reannotate_all_parent_runs_child_pushes_marks_done_and_cleans(tmp_path: Path, monkeypatch, capsys):
+    """Parent flow with a fake Hub: child process per shard, push, done marker, local cleanup, resume."""
+    import importlib.util
+
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "hf_reannotate_all.py"
+    spec = importlib.util.spec_from_file_location("hf_reannotate_all", script_path)
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    import hf_replace_shards as base
+
+    source = tmp_path / "src"
+    _legacy_shard(source)  # shard_0001
+    shutil.copytree(source / "shard_0001", source / "shard_0002")
+    work = tmp_path / "work"
+    pushed: list[tuple[str, Path]] = []
+    monkeypatch.setattr(base, "_live_run_pid", lambda data_dir: None)
+    monkeypatch.setattr(base, "_stale_root_files", lambda api, cfg: ["clips.jsonl", "manifest.json"])
+    monkeypatch.setattr(base, "_push_replace", lambda api, cfg, local, path, delete_media: (pushed.append((path, local)) or ("https://hf.co/c/" + path, 3)))
+    import video_dataset.dataset.reannotate as mod
+
+    monkeypatch.setattr(mod, "list_hub_shards", lambda cfg, token: ["shard_0001", "shard_0002"])
+    monkeypatch.setattr(mod, "update_dataset_card", lambda cfg, token: "card-updated")
+    monkeypatch.setenv("HF_TOKEN", "tok")
+    argv = ["hf_reannotate_all.py", "--source-dir", str(source), "--work-dir", str(work), "--no-negatives",
+            "--set", f"project.data_dir={tmp_path / 'data'}", "--set", "export.min_source_videos=0", "--set", "export.split.required_splits=[train]"]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert script.main() == 0
+    out = capsys.readouterr().out
+    assert [p for p, _ in pushed] == ["shard_0001", "shard_0002"] and "card-updated" in out and "pass --clean-root" in out
+    assert {p.stem for p in (work / "done").glob("*.json")} == {"shard_0001", "shard_0002"}
+    done = json.loads((work / "done" / "shard_0001.json").read_text())
+    assert done["ok"] and done["commit"] == "https://hf.co/c/shard_0001" and done["superseded_files_removed"] == 3 and done["records"] == 14
+    assert not (work / "rewritten" / "shard_0001").exists() and not (source / "shard_0001").exists()  # local copies deleted after the push
+    # resume: done shards are skipped, nothing pushed again
+    pushed.clear()
+    assert script.main() == 0 and pushed == [] and "already done" in capsys.readouterr().out
+    # a failing gate stops the run before any push of that shard
+    _legacy_shard(tmp_path / "src2")
+    monkeypatch.setattr(mod, "list_hub_shards", lambda cfg, token: ["shard_0001"])
+    argv[2] = str(tmp_path / "src2")
+    argv[-1] = "export.min_source_videos=50"
+    monkeypatch.setattr(sys, "argv", argv + ["--redo"])
+    assert script.main() == 2 and pushed == [] and (work / "rewritten" / "shard_0001").exists()
+    assert "source_pool" in capsys.readouterr().out

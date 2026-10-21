@@ -50,5 +50,10 @@ def test_config(tmp_path: Path):
         "quality.max_blockiness": "0",
         "quality.min_height": "0",  # the synthetic video is 640x360 at a tiny bitrate
         "quality.min_bitrate_kbps": "0",
+        # one synthetic video cannot fill three splits or a 50-video pool; the gates have their own tests
+        "export.min_source_videos": "0",
+        "export.split.min_validation_videos": "0",
+        "export.split.min_test_videos": "0",
+        "export.split.required_splits": "[train]",
     }
     return load_config(None, overrides, config_dir=ROOT / "config")

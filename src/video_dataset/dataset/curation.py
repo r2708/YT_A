@@ -8,13 +8,14 @@ code annotates fresh per-video exports and records merged back from earlier fina
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from typing import Any
 
 from video_dataset.config import CinematicSubsetConfig, ExportConfig, LicensingConfig, SplitConfig, TierConfig
 from video_dataset.schemas.common import SCHEMA_VERSION, ConfidenceSource
 from video_dataset.schemas.curation import Split, Tier
-from video_dataset.schemas.quality import ValidationStatus
-from video_dataset.validation.policy import strict_ok
+from video_dataset.schemas.quality import QUALITY_COMPONENTS, ValidationStatus
+from video_dataset.validation.policy import enforce_exported, strict_ok, verification_summary
 
 SCENE_LEVEL = ("scenes", "clips", "frames")  # records that describe exactly one shot
 _TIER_ORDER = {Tier.GOLD: 3, Tier.SILVER: 2, Tier.BRONZE: 1}
@@ -55,10 +56,15 @@ def duration_band(duration: float | None, bands: dict[str, list[float]]) -> str 
 
 
 # ------------------------------------------------------------------------------------ split
-def split_for_video(video_id: str, cfg: SplitConfig) -> Split:
-    """Deterministic bucket from sha1(salt | video_id); the fractions carve the unit interval."""
+def split_hash(video_id: str, cfg: SplitConfig) -> float:
+    """Deterministic position in [0, 1) from sha1(salt | id)."""
     h = hashlib.sha1(f"{cfg.salt}|{video_id}".encode()).hexdigest()
-    u = int(h[:12], 16) / float(16**12)
+    return int(h[:12], 16) / float(16**12)
+
+
+def split_for_video(video_id: str, cfg: SplitConfig) -> Split:
+    """Pure hash bucket of one id: the fractions carve the unit interval (no minimums applied)."""
+    u = split_hash(video_id, cfg)
     test = max(0.0, float(cfg.test_fraction))
     val = max(0.0, float(cfg.validation_fraction))
     if u < test:
@@ -66,6 +72,42 @@ def split_for_video(video_id: str, cfg: SplitConfig) -> Split:
     if u < test + val:
         return Split.VALIDATION
     return Split.TRAIN
+
+
+def assign_splits(group_ids: Iterable[str], cfg: SplitConfig) -> dict[str, Split]:
+    """Split of every source group in ``group_ids``.
+
+    Each group gets its hash bucket (``split_for_video``). When that leaves the test or validation
+    split below ``min_test_videos`` / ``min_validation_videos``, the groups with the lowest hash
+    among the remaining train groups are moved over (test first, then validation), so the result is
+    still a deterministic function of (salt, set of ids). Train always keeps at least one group; a
+    single-group export is all train. A group with a hash under the fractions never leaves its eval
+    split, so the hash-based core is stable as the pool grows; only the top-up groups can move back
+    to train once the fractions alone satisfy the minimums.
+    """
+    ids = sorted({str(g) for g in group_ids if g})
+    if not ids:
+        return {}
+    out = {g: split_for_video(g, cfg) for g in ids}
+    n = len(ids)
+    if n == 1:
+        return {ids[0]: Split.TRAIN}
+    budget = n - 1  # groups that may sit in eval splits
+    want = {Split.TEST: max(0, int(cfg.min_test_videos)), Split.VALIDATION: max(0, int(cfg.min_validation_videos))}
+    have = {sp: sum(1 for v in out.values() if v == sp) for sp in (Split.TEST, Split.VALIDATION)}
+    # minimums that do not fit beside one train group are reduced, validation first
+    while want[Split.TEST] + want[Split.VALIDATION] > budget:
+        if want[Split.VALIDATION] >= want[Split.TEST] and want[Split.VALIDATION] > 0:
+            want[Split.VALIDATION] -= 1
+        else:
+            want[Split.TEST] -= 1
+    train_sorted = sorted((g for g in ids if out[g] == Split.TRAIN), key=lambda g: (split_hash(g, cfg), g))
+    for sp in (Split.TEST, Split.VALIDATION):
+        while have[sp] < want[sp] and len(train_sorted) > 1:
+            g = train_sorted.pop(0)
+            out[g] = sp
+            have[sp] += 1
+    return out
 
 
 # ------------------------------------------------------------------------------------ tiers
@@ -233,7 +275,18 @@ def annotate_records(
     records["sequences"] = build_sequences(records, cfg.sequences) if cfg.sequences.enabled else []
     fill_prompt_variants(records, int(cfg.prompt_variants), seed)
 
-    counts = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0, "strict": 0, "dropped_rights_records": 0}
+    counts = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0, "strict": 0, "dropped_rights_records": 0, "policy_downgraded": 0}
+    enforce = bool(getattr(cfg, "enforce_policy", True))
+    group_ids: set[str] = set()
+    for rows in records.values():
+        for rec in rows:
+            vid = str(rec.get("video_id") or "")
+            canonical = video_info.get(vid, {}).get("canonical_video_id") or None
+            if vid and canonical != vid:
+                group_ids.add(canonical or vid)
+            elif vid:
+                group_ids.add(vid)
+    splits = assign_splits(group_ids, cfg.split) if cfg.split.enabled else {}
     dup_videos: set[str] = set()
     licensed_videos: set[str] = set()
     release_rights = {str(r).lower() for r in ((licensing.release_rights if licensing else []) or [])}
@@ -261,7 +314,15 @@ def annotate_records(
             rec["source_group_id"] = split_id or None
             rec["schema_version"] = SCHEMA_VERSION
             rec["coverage"] = dict(vinfo.get("coverage") or rec.get("coverage") or {})
-            rec["split"] = split_for_video(split_id, cfg.split).value if cfg.split.enabled and split_id else None
+            rec["split"] = splits[split_id].value if cfg.split.enabled and split_id in splits else None
+            if enforce and enforce_exported(rec):
+                counts["policy_downgraded"] += 1
+            v = rec.get("validation")
+            if isinstance(v, dict):
+                v["verification"] = verification_summary(rec)
+            q = rec.get("quality")
+            if isinstance(q, dict):
+                q["missing_components"] = [c for c in QUALITY_COMPONENTS if q.get(c) is None]
             if cfg.tiers.enabled:
                 tier, reasons = tier_for_record(rec, cfg.tiers)
                 if canonical:

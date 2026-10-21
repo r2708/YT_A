@@ -464,7 +464,7 @@ def test_stage_coverage_distinguishes_not_run_from_empty(tmp_path: Path):
     ctx = SimpleNamespace(config=cfg, db=db, video_id="vid_x", media_info=SimpleNamespace(has_audio=True))
     cov = stage_coverage(ctx, Transcript(video_id="vid_x", provider="none", has_speech=False, status="not_run"), None, SimpleNamespace(summary={"verifier": "heuristic", "caption_alignment": "model_unavailable", "text_checker": "rules"}))
     assert cov["transcription"] == "disabled" and cov["ocr"] == "disabled" and cov["audio_events"] == "failed" and cov["vision"] == "ran:heuristic"
-    assert cov["clip_alignment"] == "not_run" and cov["verifier"] == "ran:heuristic" and cov["text_checks"] == "ran" and cov["clip_boundaries"] == "ran:copy"
+    assert cov["clip_alignment"] == "not_run" and cov["verifier"] == "ran:heuristic" and cov["text_checks"] == "ran" and cov["clip_boundaries"] == "ran:all"
     cov2 = stage_coverage(ctx, Transcript(video_id="vid_x", provider="none", has_speech=False, status="no_audio"), None, SimpleNamespace(summary={}))
     assert cov2["transcription"] == "no_audio"
     rates = coverage_rates([{"coverage": cov}, {"coverage": cov2}])
