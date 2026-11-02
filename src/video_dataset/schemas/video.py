@@ -72,6 +72,12 @@ class MediaInfo(BaseSchema):
     has_audio: bool = False
     audio: AudioStreamInfo | None = None
     size_bytes: int | None = None
+    # colour metadata as declared by the stream (ffprobe); None when the container does not say
+    pix_fmt: str | None = None
+    color_space: str | None = None  # e.g. bt709, bt2020nc
+    color_transfer: str | None = None  # e.g. bt709, smpte2084 (PQ), arib-std-b67 (HLG)
+    color_primaries: str | None = None  # e.g. bt709, bt2020
+    color_range: str | None = None  # tv (limited) | pc (full)
     metadata_duration: float | None = None  # duration the source reported (yt-dlp) before download
     duration_mismatch_seconds: float | None = None  # |probed - metadata| when both are known
     quality_flags: list[str] = Field(default_factory=list)  # low_resolution | low_bitrate | duration_mismatch

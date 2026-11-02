@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,33 @@ def probe_browser_cookies(spec: tuple[str, str | None, str | None, str | None]) 
 
 def reset_cookie_probe_cache() -> None:
     _BROWSER_COOKIE_PROBE.clear()
+
+
+# Process-wide gate on simultaneous yt-dlp sessions. `pipeline.workers` sizes the per-video thread
+# pool, so with 18 workers the DOWNLOAD stage used to fire 18 YouTube requests from one IP within the
+# same second - exactly the pattern that trips "Sign in to confirm you're not a bot" for every video.
+# `download.concurrency` now bounds that regardless of how many videos are in flight.
+_DOWNLOAD_GATE_LOCK = threading.Lock()
+_DOWNLOAD_GATE: threading.BoundedSemaphore | None = None
+_DOWNLOAD_GATE_SIZE = 0
+_BOT_CHECK_MARKER = "confirm you"  # "Sign in to confirm you're not a bot" (curly or straight apostrophe)
+_BOT_HINT_SHOWN = False
+
+
+def download_gate(concurrency: int) -> threading.BoundedSemaphore:
+    """Return the shared semaphore sized to ``concurrency`` (re-created if the size changes)."""
+    global _DOWNLOAD_GATE, _DOWNLOAD_GATE_SIZE
+    size = max(1, int(concurrency or 1))
+    with _DOWNLOAD_GATE_LOCK:
+        if _DOWNLOAD_GATE is None or size != _DOWNLOAD_GATE_SIZE:
+            _DOWNLOAD_GATE = threading.BoundedSemaphore(size)
+            _DOWNLOAD_GATE_SIZE = size
+        return _DOWNLOAD_GATE
+
+
+def is_bot_check(exc: BaseException | str) -> bool:
+    """True when YouTube answered with its anti-bot sign-in wall instead of the video."""
+    return _BOT_CHECK_MARKER in str(exc).lower() and "not a bot" in str(exc).lower()
 
 
 def _parse_rate_limit(value: str | None) -> int | None:
@@ -454,8 +482,10 @@ class YouTubeDownloader:
         if existing is None:
             opts["match_filter"] = _match_filter
 
+        gate = download_gate(getattr(self.config, "concurrency", 2))
+
         def _extract() -> Any:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with gate, yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=True)
 
         def _run() -> dict[str, Any]:
@@ -466,6 +496,9 @@ class YouTubeDownloader:
                 # Second line of defence: the preflight probe passed (or was bypassed) but yt-dlp
                 # still failed while loading cookies. Drop them and try again without.
                 if not (is_cookie_failure(exc) and self._cookies_optional() and self._strip_cookie_options(opts)):
+                    # Classify here so a removed/private video becomes VideoUnavailableError before
+                    # retry_call sees it - otherwise it logs "retry 1/2" and only then bails out.
+                    _classify(exc)
                     raise
                 log.warning(
                     "yt-dlp could not load cookies (%s: %s); retrying %s without cookies",
@@ -484,9 +517,22 @@ class YouTubeDownloader:
             return dict(info)
 
         def _classify(exc: BaseException) -> None:
+            global _BOT_HINT_SHOWN
             msg = str(exc).lower()
             if any(m in msg for m in _UNAVAILABLE_MARKERS):
                 raise VideoUnavailableError(str(exc)) from exc
+            if is_bot_check(exc) and not _BOT_HINT_SHOWN:
+                _BOT_HINT_SHOWN = True
+                has_cookies = bool(opts.get("cookiefile") or opts.get("cookiesfrombrowser"))
+                log.warning(
+                    "YouTube is serving its anti-bot sign-in wall to this IP. %s Retries of the same video "
+                    "will not help; lower download.concurrency and/or use a signed-in browser's cookies.",
+                    "Cookies ARE being sent, so the signed-in session is probably rotated/expired - open YouTube "
+                    "in that browser, make sure you are logged in, and run again."
+                    if has_cookies else
+                    "No cookies are configured: set download.cookies_from_browser (e.g. brave, chrome, firefox) "
+                    "or download.cookies_file to a browser session that is logged in to YouTube.",
+                )
 
         try:
             try:

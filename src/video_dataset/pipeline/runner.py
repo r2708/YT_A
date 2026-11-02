@@ -433,13 +433,19 @@ class PipelineRunner:
             self.models.pop(key, None)
 
     # ------------------------------------------------------------------ maintenance
-    REJECTED_ERRORS = ("DownloadRejected:", "VideoRejected:", "VideoRejectedError:")
+    REJECTED_ERRORS = (
+        "DownloadRejected:", "VideoRejected:", "VideoRejectedError:",
+        # source gone on the platform side (removed / private / terminated / region-blocked);
+        # "DownloadFailed: unavailable" matches records written before DownloadUnavailable existed
+        "DownloadUnavailable:", "DownloadFailed: unavailable",
+    )
 
     def unfinished_videos(self, include_rejected: bool = False) -> list[tuple[str, InputItem | None]]:
         """Every registered video that has not reached EXPORT, in registration order.
 
-        Videos whose failure was a policy rejection (URL/domain, duration, size) are skipped unless
-        `include_rejected`, because re-running them cannot succeed until the limits change."""
+        Videos whose failure was a policy rejection (URL/domain, duration, size) or a source that no
+        longer exists on the platform (removed, private, terminated channel, region-blocked) are skipped
+        unless `include_rejected`, because re-running them cannot succeed on its own."""
         out: list[tuple[str, InputItem | None]] = []
         for v in self.db.list_videos():
             vid = v["video_id"]
@@ -448,7 +454,7 @@ class PipelineRunner:
             if not include_rejected:
                 err = str(v.get("last_error") or "")
                 if err.startswith(self.REJECTED_ERRORS):
-                    log.info("resume: skipping %s (rejected: %s)", vid, err[:120])
+                    log.info("resume: skipping %s (unrecoverable: %s)", vid, err[:120])
                     continue
             out.append((vid, self.input_for(vid)))
         return out

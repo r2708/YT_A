@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from video_dataset.config import FrameSamplingConfig
 from video_dataset.frame_sampling.boundary import BoundaryResult, check_clip_boundaries
@@ -53,9 +54,11 @@ class ClipStats:
         }
 
 
-def probe_clip(path: Path, ffprobe_path: str | None = None) -> dict[str, float | int | None]:
-    """duration / fps / width / height of a media file (ffprobe, OpenCV fallback); None when unknown."""
-    out: dict[str, float | int | None] = {"duration": None, "fps": None, "width": None, "height": None}
+def probe_clip(path: Path, ffprobe_path: str | None = None) -> dict[str, float | int | bool | None]:
+    """duration / fps / width / height / frame_count / has_video / has_audio of a media file
+    (ffprobe, OpenCV fallback); None when unknown. ``frame_count`` is the stream's ``nb_frames``
+    (or the OpenCV frame count) so a clip can be checked for dropped / duplicated frames."""
+    out: dict[str, float | int | bool | None] = {"duration": None, "fps": None, "width": None, "height": None, "frame_count": None, "has_video": None, "has_audio": None}
     try:
         info = ffprobe_json(path, ffprobe_path)
     except Exception as exc:
@@ -67,13 +70,20 @@ def probe_clip(path: Path, ffprobe_path: str | None = None) -> dict[str, float |
             out["duration"] = d if d > 0 else None
         except (TypeError, ValueError):
             pass
-        video = next((s for s in info.get("streams") or [] if s.get("codec_type") == "video"), None)
+        streams = info.get("streams") or []
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        out["has_video"] = video is not None
+        out["has_audio"] = any(s.get("codec_type") == "audio" for s in streams)
         if video:
             from video_dataset.utils.ffmpeg import parse_rate
 
             out["fps"] = parse_rate(video.get("avg_frame_rate")) or parse_rate(video.get("r_frame_rate"))
             out["width"] = int(video.get("width") or 0) or None
             out["height"] = int(video.get("height") or 0) or None
+            try:
+                out["frame_count"] = int(video.get("nb_frames") or 0) or None
+            except (TypeError, ValueError):
+                out["frame_count"] = None
         if out["duration"] is not None:
             return out
     try:
@@ -86,12 +96,35 @@ def probe_clip(path: Path, ffprobe_path: str | None = None) -> dict[str, float |
             out["fps"] = out["fps"] or (float(fps) if fps else None)
             out["width"] = out["width"] or (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None)
             out["height"] = out["height"] or (int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None)
+            out["frame_count"] = out["frame_count"] or (int(n) if n else None)
+            if out["has_video"] is None:
+                out["has_video"] = bool(cap.isOpened() and n)
         finally:
             cap.release()
         out["duration"] = n / fps if fps and n else out["duration"]
     except Exception as exc:
         log.debug("OpenCV duration probe failed on %s: %s", path.name, exc)
     return out
+
+
+def frame_count_check(probe: dict[str, Any], tolerance_frames: int = 2) -> str:
+    """passed | failed | not_run: the file's frame count vs round(duration * fps)."""
+    n, d, fps = probe.get("frame_count"), probe.get("duration"), probe.get("fps")
+    if not n or not d or not fps:
+        return "not_run"
+    return "passed" if abs(int(n) - int(round(float(d) * float(fps)))) <= tolerance_frames else "failed"
+
+
+def stream_integrity(probe: dict[str, Any], has_audio: bool) -> str:
+    """passed | failed | not_run: a decodable video stream (and an audio stream when the source
+    had audio and the clip was cut with audio)."""
+    if probe.get("has_video") is None:
+        return "not_run"
+    if not probe.get("has_video") or not probe.get("duration"):
+        return "failed"
+    if has_audio and probe.get("has_audio") is False:
+        return "failed"
+    return "passed"
 
 
 def media_duration(path: Path, ffprobe_path: str | None = None) -> float | None:
@@ -213,8 +246,26 @@ def _cut_one(
 
     delta["error"] = error
     boundary = BoundaryResult("not_run")
+    repair: str | None = None
     if source_fps and _should_verify(verify, produced_by):
         boundary = check_clip_boundaries(video_path, out, start, end, float(source_fps), tolerance=tolerance, search=search, max_hamming=max_hamming)
+        if boundary.state == "failed" and codec == "auto" and produced_by != "libx264":
+            # the stream copy's first / last frames lie outside the shot: re-cut this clip exactly once
+            # (accurate seek + re-encode) and verify again, instead of shipping a clip the record misdescribes
+            try:
+                log.debug("clip %s fails the boundary check (%.2fs); re-encoding", cid, boundary.error_seconds or -1)
+                _cut(video_path, out, start, end, reencode=True, has_audio=has_audio, clip_height=clip_height, ffmpeg_path=ffmpeg_path, vf=vf)
+                produced_by = "libx264"
+                probe = probe_clip(out, ffprobe_path)
+                measured = probe["duration"]
+                error = abs(float(measured) - expected) if measured is not None else 0.0
+                delta["error"] = error
+                delta["reencoded"] += 1
+                boundary = check_clip_boundaries(video_path, out, start, end, float(source_fps), tolerance=tolerance, search=search, max_hamming=max_hamming)
+                repair = "repaired" if boundary.state == "passed" else "still_failed"
+            except Exception as exc:
+                log.warning("clip %s re-cut failed: %s", cid, exc)
+                repair = "still_failed"
         delta["boundary_checked"] += 1
         if boundary.state == "failed":
             delta["boundary_failed"] += 1
@@ -241,6 +292,10 @@ def _cut_one(
         actual_end=boundary.actual_end,
         boundary_error_seconds=boundary.error_seconds,
         boundary_check=boundary.state,
+        boundary_repair=repair,
+        frame_count=int(probe["frame_count"]) if probe.get("frame_count") else None,
+        frame_count_check=frame_count_check(probe),
+        stream_integrity=stream_integrity(probe, has_audio),
     )
     return clip, delta, None
 

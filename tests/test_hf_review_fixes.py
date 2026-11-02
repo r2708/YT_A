@@ -13,6 +13,7 @@ from video_dataset.config import load_config
 from video_dataset.dataset.aggregate import licenses_block, tier_policy_block
 from video_dataset.dataset.curation import annotate_records, assign_splits, split_for_video, split_manifest
 from video_dataset.dataset.export import DATASET_FILES, write_jsonl_files, write_typed_parquet_files
+from video_dataset.dataset.inventory import write_inventory
 from video_dataset.dataset.release import (
     accepted_means_verified_gate,
     counts_gate,
@@ -22,6 +23,7 @@ from video_dataset.dataset.release import (
     source_pool_gate,
 )
 from video_dataset.dataset.stats import validation_report
+from video_dataset.schemas.common import SCHEMA_VERSION
 from video_dataset.schemas.curation import Split
 from video_dataset.schemas.quality import QualityScore
 from video_dataset.utils.io import read_jsonl, write_json_atomic
@@ -108,7 +110,12 @@ def _final(tmp_path: Path, records: dict) -> Path:
     counts = write_jsonl_files(full, final)
     typed = write_typed_parquet_files(full, final)
     vids = sorted({r["video_id"] for rows in full.values() for r in rows})
-    write_json_atomic(final / "manifest.json", {"videos": [{"video_id": v, "channel": "c", "files": {"scenes": f"per_video/{v}/scenes.jsonl"}} for v in vids], "counts": counts, "typed_parquet_counts": typed, "splits": {}})
+    write_json_atomic(final / "manifest.json", {
+        "release_id": "test-release", "schema_version": SCHEMA_VERSION, "policy_version": POLICY_VERSION,
+        "videos": [{"video_id": v, "channel": "c", "rights_status": "declared_cc_by", "files": {"scenes": f"per_video/{v}/scenes.jsonl"}} for v in vids],
+        "counts": counts, "typed_parquet_counts": typed, "splits": {},
+        "environment": {"code": {"git_commit": "0" * 40}, "models": {"vision": {"provider": "heuristic"}}},
+    })
     write_json_atomic(final / "statistics.json", {"jsonl_counts": counts, **{n: counts[n] for n in DATASET_FILES}})
     by_split: dict[str, set[str]] = {}
     for rows in full.values():
@@ -116,6 +123,7 @@ def _final(tmp_path: Path, records: dict) -> Path:
             if r.get("split"):
                 by_split.setdefault(r["split"], set()).add(r["video_id"])
     write_json_atomic(final / "splits.json", {"videos": {k: sorted(v) for k, v in by_split.items()}, "counts": {k: len(v) for k, v in by_split.items()}})
+    write_inventory(final, include_media=False)  # checksums.sha256 is a required release file
     return final
 
 

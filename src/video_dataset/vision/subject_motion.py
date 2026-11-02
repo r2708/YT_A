@@ -174,7 +174,25 @@ def analyze_subject_motion(
         confidence_source=ConfidenceSource.MEASUREMENT,
         direction=direction_from_label(label),
         trajectory=[[round(t, 3), round(x, 4), round(y, 4), round(a, 4)] for t, x, y, a in zip(ts, cxs, cys, areas)][:20],
+        world_motion=world_motion(cam, measured=camera_velocity(scan, min(ts), max(ts)) is not None),
+        camera_motion_source="optical_flow",
     )
+
+
+def world_motion(cam: tuple[float, float], measured: bool = True) -> dict[str, Any]:
+    """The background / world entity: how the static world streams across the frame (the global
+    optical flow), separate from both the camera label and the subject box. Units as above."""
+    if not measured:
+        return {"label": "unmeasured", "velocity": None, "source": "background_optical_flow", "units": "fraction_of_frame_width_per_second"}
+    vx, vy = cam
+    speed = float(np.hypot(vx, vy))
+    if speed < EPS:
+        label = "static"
+    elif abs(vx) >= abs(vy):
+        label = "streams_right" if vx > 0 else "streams_left"
+    else:
+        label = "streams_down" if vy > 0 else "streams_up"
+    return {"label": label, "velocity": [round(vx, 4), round(vy, 4)], "source": "background_optical_flow", "units": "fraction_of_frame_width_per_second"}
 
 
 _DIRECTIONS = {"moves_left": "left", "moves_right": "right", "moves_up": "up", "moves_down": "down", "approaches": "toward_camera", "recedes": "away_from_camera"}
@@ -234,19 +252,31 @@ def tracking_direction(movement: CameraMovement, sm: SubjectMotion) -> CameraMov
 
 
 def apply_subject_motion(analysis: SceneAnalysis, sm: SubjectMotion | None) -> None:
-    """Attach the measurement; promote pan/handheld to TRACKING when the subject is held in frame."""
+    """Attach the measurement; refine a measured pan / handheld camera to TRACKING when the
+    subject is held in frame while the background streams.
+
+    The refinement needs *both* signals: the global optical flow says the camera moves (that is
+    the camera evidence) and the subject box stays put (that is the subject evidence). Subject
+    displacement alone never changes the camera label (issue P1-10); the original flow label is
+    kept in ``movement_alternatives`` and ``camera_motion_source`` records the combined evidence."""
     if sm is None:
         return
     analysis.subject_motion = sm
-    if sm.label == "tracked_by_camera" and analysis.camera.movement in TRACKABLE and analysis.camera.movement not in TRACKING_SET:
+    cam_speed = float(np.hypot(*(list(sm.camera_velocity) + [0.0, 0.0])[:2]))
+    if sm.label == "tracked_by_camera" and cam_speed >= EPS and analysis.camera.movement in TRACKABLE and analysis.camera.movement not in TRACKING_SET:
         confs = [c for c in (analysis.camera.confidence, sm.confidence) if c is not None]
+        previous = str(analysis.camera.movement)
         analysis.camera = analysis.camera.model_copy(update={
             "movement": tracking_direction(analysis.camera.movement, sm),
             "tracked_subject": sm.subject,
             "confidence": round(min(confs), 3) if confs else None,
             "confidence_source": ConfidenceSource.MEASUREMENT,
+            "camera_motion_source": "optical_flow+subject_track",
+            "movement_alternatives": [previous],
         })
         analysis.camera = type(analysis.camera).model_validate(analysis.camera.model_dump())  # re-derive the taxonomy block
+    elif not analysis.camera.camera_motion_source and analysis.camera.confidence_source == ConfidenceSource.MEASUREMENT:
+        analysis.camera = analysis.camera.model_copy(update={"camera_motion_source": "optical_flow"})
     phrase = subject_motion_phrase(sm)
     action = phrase[0].upper() + phrase[1:]
     if action not in analysis.actions and sm.label != "static":

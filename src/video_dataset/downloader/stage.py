@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from video_dataset.downloader.local import LocalFileSource
 from video_dataset.downloader.youtube import YouTubeDownloader
-from video_dataset.errors import VideoRejected
+from video_dataset.errors import NonRetryableError, VideoRejected
 from video_dataset.pipeline.context import StageOutput, VideoContext
 from video_dataset.schemas.video import DownloadRecord, DownloadStatus
 from video_dataset.stages import Stage
@@ -18,6 +18,10 @@ class DownloadFailed(RuntimeError):
 
 class DownloadRejected(DownloadFailed, VideoRejected):
     """Blocked by a configured limit (URL policy, duration, size, disk). Retrying will not help."""
+
+
+class DownloadUnavailable(DownloadFailed, NonRetryableError):
+    """The source itself is gone (removed, private, terminated channel, region-blocked). Retrying will not help."""
 
 
 def download_stage(ctx: VideoContext) -> StageOutput:
@@ -56,6 +60,8 @@ def download_stage(ctx: VideoContext) -> StageOutput:
         write_json_atomic(ctx.paths.download_record_file(ctx.video_id), record)
         if result.status == DownloadStatus.REJECTED:
             raise DownloadRejected(f"{result.status}: {result.error}")
+        if result.status == DownloadStatus.UNAVAILABLE:
+            raise DownloadUnavailable(f"{result.status}: {result.error}")
         raise DownloadFailed(f"{result.status}: {result.error}")
 
     assert result.metadata is not None

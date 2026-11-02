@@ -100,7 +100,13 @@ def test_reannotate_shard_rewrites_everything_into_the_output_dir(tmp_path: Path
     assert "start" in next(read_jsonl(shard / "scenes.jsonl"))
     # in place: a second run on the output is idempotent
     again = reannotate_shard(out, cfg)
-    assert again["records_out"] == 14 and list(read_jsonl(out / "scenes.jsonl")) == rows
+
+    def _stable(r: dict) -> dict:  # provenance.generated_at is the export time: it differs by design
+        r = json.loads(json.dumps(r))
+        (r.get("provenance") or {}).pop("generated_at", None)
+        return r
+
+    assert again["records_out"] == 14 and [_stable(r) for r in read_jsonl(out / "scenes.jsonl")] == [_stable(r) for r in rows]
 
 
 def test_reannotate_fails_closed_on_legacy_accepted_records(tmp_path: Path):
@@ -174,7 +180,8 @@ def test_hf_reannotate_all_worker_rewrites_gates_and_reports(tmp_path: Path, mon
     src = _legacy_shard(tmp_path / "src")
     work = tmp_path / "work"
 
-    def fake_download(config, path_in_repo, dest, token):
+    def fake_download(config, path_in_repo, dest, token, lean=True):
+        assert lean  # the worker asks for the lean download by default
         local = dest / path_in_repo
         shutil.copytree(src, local, dirs_exist_ok=True)
         return local

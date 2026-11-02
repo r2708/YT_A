@@ -24,12 +24,18 @@ from typing import Any
 from video_dataset.config import PipelineConfig
 from video_dataset.dataset.aggregate import (
     _write_dataset_files,
+    cinematic_coverage,
+    fill_lighting_and_color,
     licenses_block,
+    provenance_rows,
+    qa_rejection_analysis,
     splits_block,
     tier_policy_block,
 )
 from video_dataset.dataset.curation import (
     annotate_records,
+    load_rights_evidence,
+    rights_info_for,
     rights_status_for,
     split_manifest,
     subset_records,
@@ -40,17 +46,20 @@ from video_dataset.dataset.export import (
     DATASET_FILES,
     SCHEMA_FILE,
     SPLITS_FILE,
+    UpgradeStats,
     upgrade_records,
     write_jsonl_files,
     write_schema_file,
 )
+from video_dataset.dataset.media_manifest import write_media_manifest
 from video_dataset.dataset.negatives import caption_hard_negatives, qa_hard_negatives
 from video_dataset.dataset.stats import compute_diversity, compute_statistics
-from video_dataset.schemas.common import SCHEMA_VERSION
+from video_dataset.schemas.common import SCHEMA_VERSION, utc_now_iso
 from video_dataset.schemas.events import Event
 from video_dataset.schemas.qa import QARecord
 from video_dataset.schemas.vision import ObjectAnnotation, SceneAnalysis
-from video_dataset.utils.io import read_json, read_jsonl, write_json_atomic
+from video_dataset.utils.environment import environment_manifest
+from video_dataset.utils.io import read_json, read_jsonl, write_json_atomic, write_jsonl
 from video_dataset.utils.logging import get_logger
 from video_dataset.validation.policy import POLICY_VERSION
 
@@ -185,15 +194,30 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
     n_in = sum(len(r) for r in records.values())
     if n_in == 0:
         raise FileNotFoundError(f"no dataset records found in {shard_dir}")
-    records = upgrade_records(records)
+    upgrade_stats = UpgradeStats()
+    records = upgrade_records(records, upgrade_stats)
     neg_counts = rebuild_hard_negatives(records, int(config.export.hard_negatives_per_record), int(config.qa.seed), only_missing=False) if rebuild_negatives and config.export.hard_negatives else {}
     video_info = video_info_from_manifests(manifests, float(config.deduplication.video_similarity_threshold), bool(config.deduplication.video_fingerprint))
+    rights_evidence = load_rights_evidence(shard_dir)
     for m in manifests:
-        vi = video_info.setdefault(str(m.get("video_id")), {})
+        vid = str(m.get("video_id"))
+        vi = video_info.setdefault(vid, {})
         vi.setdefault("rights_status", m.get("rights_status") or rights_status_for(m.get("license_status")))
         vi.setdefault("coverage", m.get("coverage") or {})
-    curation = annotate_records(records, config.export, video_info, config.licensing, seed=int(config.qa.seed))
+        vi.update({"channel": m.get("channel"), "duration": m.get("duration"), "license": m.get("license"), "url": m.get("url"), "retrieved_at": m.get("retrieved_at"), "media": m.get("media") or {}})
+        if vid in rights_evidence:
+            vi["rights_evidence"] = rights_evidence[vid]
+            vi["rights_status"] = rights_evidence[vid]["status"]
+    environment = environment_manifest(config)
+    provenance_base = {"pipeline_version": environment.get("code", {}).get("package_version"), "git_commit": environment.get("code", {}).get("git_commit"), "models": {}}
+    started_at = utc_now_iso()
+    curation = annotate_records(records, config.export, video_info, config.licensing, seed=int(config.qa.seed), provenance_base=provenance_base)
+    curation["schema_upgrade"] = upgrade_stats.as_dict()
+    fill_lighting_and_color(records, video_info)
     splits = split_manifest(records)
+    rights_by_video = {vid: str((vi.get("rights_evidence") or {}).get("status") or vi.get("rights_status") or "unknown") for vid, vi in video_info.items()}
+    media_summary = write_media_manifest(records, out, config.data_dir, False, rights=rights_by_video)
+    release_id = f"{started_at.replace(':', '').replace('-', '')}-{(provenance_base.get('git_commit') or 'nogit')[:8]}"
 
     counts, combined_rows, typed_counts, parquet_rows = _write_dataset_files(records, out, config)
     write_schema_file(out / SCHEMA_FILE)
@@ -228,13 +252,23 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
         "empty_record_types": [name for name in DATASET_FILES if not counts.get(name)],
         "diversity": compute_diversity(records, new_manifests), "licenses": licenses_block(config), "tier_policy": tier_policy_block(config),
     })
+    stats.update({"release_id": release_id, "source_revision": provenance_base.get("git_commit"), "generated_at": started_at, "media_references": media_summary, "cinematic_coverage": cinematic_coverage(records), "qa_rejection_analysis": qa_rejection_analysis(records)})
     write_json_atomic(out / "statistics.json", stats)
+    for m in new_manifests:
+        m["rights"] = rights_info_for(video_info.get(str(m.get("video_id")), {}))
+    write_jsonl(out / "provenance.jsonl", provenance_rows(new_manifests, video_info))
     write_json_atomic(out / "manifest.json", {
+        "release_id": release_id, "source_revision": provenance_base.get("git_commit"), "generated_at": started_at,
         "videos": new_manifests, "counts": counts, "typed_parquet_counts": typed_counts, "parquet_rows": parquet_rows, "combined_jsonl_rows": combined_rows,
         "empty_record_types": [name for name in DATASET_FILES if not counts.get(name)], "splits": {k: len(v) for k, v in splits.items()}, "cinematic": cinematic_counts,
         "schema_version": SCHEMA_VERSION, "policy_version": POLICY_VERSION, "licenses": licenses_block(config), "tier_policy": tier_policy_block(config),
-        "policy_downgraded": curation.get("policy_downgraded", 0), "reannotated": True,
+        "media_references": media_summary, "schema_upgrade": upgrade_stats.as_dict(),
+        "policy_downgraded": curation.get("policy_downgraded", 0), "reannotated": True, "environment": environment,
     })
+    if getattr(config.export, "inventory", True):
+        from video_dataset.dataset.inventory import write_inventory
+
+        write_inventory(out, include_media=False)
     summary = {
         "shard": str(shard_dir), "output": str(out), "videos": len(by_video), "records_in": n_in, "records_out": sum(counts.values()),
         "splits": {k: len(v) for k, v in splits.items()}, "tiers": stats.get("records_by_tier", {}).get("scenes", {}),
@@ -265,17 +299,26 @@ def list_hub_shards(config: PipelineConfig, token: str | None) -> list[str]:
     return sorted(out)
 
 
-def download_shard(config: PipelineConfig, path_in_repo: str, dest: Path, token: str | None) -> Path:
-    """Download one shard folder (dataset files + per_video, no media) into ``dest/<shard>``."""
+def download_shard(config: PipelineConfig, path_in_repo: str, dest: Path, token: str | None, lean: bool = True) -> Path:
+    """Download one shard folder into ``dest/<shard>`` (never the media).
+
+    ``lean`` (default) fetches only what re-annotation reads: the per-type ``<type>.jsonl`` files
+    and ``manifest.json`` / ``statistics.json``. Everything else in a shard (``dataset.jsonl``, every
+    Parquet file, ``per_video/``, ``cinematic/``, ``strict/``) is regenerated from those records, so
+    pulling it would only multiply the download (~4x). ``lean=False`` restores the full download."""
     from huggingface_hub import snapshot_download
+
+    from video_dataset.dataset.export import DATASET_FILES
 
     cfg = config.upload
     dest.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=cfg.repo_id, repo_type=cfg.repo_type, token=token, local_dir=str(dest),
-        allow_patterns=[f"{path_in_repo}/*.jsonl", f"{path_in_repo}/*.parquet", f"{path_in_repo}/*.json", f"{path_in_repo}/per_video/*/*"],
-        ignore_patterns=[f"{path_in_repo}/frames/*", f"{path_in_repo}/clips/*"],
-    )
+    if lean:
+        allow = [f"{path_in_repo}/{name}.jsonl" for name in DATASET_FILES] + [f"{path_in_repo}/manifest.json", f"{path_in_repo}/statistics.json", f"{path_in_repo}/provenance.jsonl", f"{path_in_repo}/rights_evidence.jsonl", f"{path_in_repo}/reviews/*"]
+        ignore = [f"{path_in_repo}/frames/*", f"{path_in_repo}/clips/*", f"{path_in_repo}/per_video/*", f"{path_in_repo}/cinematic/*", f"{path_in_repo}/strict/*", f"{path_in_repo}/exports/*"]
+    else:
+        allow = [f"{path_in_repo}/*.jsonl", f"{path_in_repo}/*.parquet", f"{path_in_repo}/*.json", f"{path_in_repo}/per_video/*/*"]
+        ignore = [f"{path_in_repo}/frames/*", f"{path_in_repo}/clips/*"]
+    snapshot_download(repo_id=cfg.repo_id, repo_type=cfg.repo_type, token=token, local_dir=str(dest), allow_patterns=allow, ignore_patterns=ignore)
     local = dest / path_in_repo
     if not local.exists():
         raise FileNotFoundError(f"{path_in_repo} was not found in {cfg.repo_id}")

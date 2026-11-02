@@ -6,7 +6,13 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
-from video_dataset.schemas.common import BaseSchema, ConfidenceSource, StrEnum
+from video_dataset.schemas.common import (
+    AnnotationProvenance,
+    BaseSchema,
+    ConfidenceSource,
+    RightsInfo,
+    StrEnum,
+)
 from video_dataset.schemas.curation import HardNegative, Split, Tier
 from video_dataset.schemas.quality import QualityScore, ValidationInfo
 
@@ -80,6 +86,13 @@ class QARecord(BaseSchema):
     coverage: dict[str, str] = Field(default_factory=dict)
     annotation_scope: str | None = "qa"
     generation_target: str | None = "not_for_generation"
+    # schema 2.3.0 (same meaning as on the other record types, see schemas/dataset.py)
+    provenance: AnnotationProvenance | None = None
+    rights: RightsInfo | None = None
+    temporal_validation: dict[str, Any] | None = None
+    continuity: dict[str, Any] | None = None
+    confidence_calibration: str | None = None
+    extensions: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod

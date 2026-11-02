@@ -15,6 +15,10 @@ from video_dataset.schemas.vision import SubjectMotion
 from video_dataset.utils.text import with_article
 from video_dataset.vision.subject_motion import subject_motion_phrase
 
+# Version of the generation-prompt template below (published in every record's provenance block).
+# Bump whenever the wording rules change so prompts of different releases are distinguishable.
+TEMPLATE_VERSION = "generation_prompt_v2026.10"
+
 _SHOT_WORDS = {"extreme_wide": "extreme wide", "wide": "wide", "medium": "medium", "close_up": "close-up", "extreme_close_up": "extreme close-up"}
 _ANGLE_WORDS = {"low": "from a low angle", "high": "from a high angle", "overhead": "from directly overhead", "aerial": "from the air", "dutch": "with a tilted (dutch) frame"}
 _LENS_WORDS = {"wide_angle": "wide-angle lens", "normal": "normal lens", "portrait": "portrait lens", "telephoto": "telephoto lens", "anamorphic": "anamorphic lens", "fisheye": "fisheye lens", "macro": "macro lens"}

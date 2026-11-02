@@ -85,8 +85,17 @@ def _verifier_score(v) -> float | None:  # type: ignore[no-untyped-def]
     return v.score
 
 
+_INSTRUMENT_SOURCES = {
+    ConfidenceSource.MEASUREMENT: "instrument:measurement",
+    ConfidenceSource.OCR_SCORE: "instrument:ocr_score",
+    ConfidenceSource.ASR_LOGPROB: "instrument:asr_logprob",
+    ConfidenceSource.DETECTOR_SCORE: "instrument:detector_score",
+}
+
+
 def scene_quality(a: SceneAnalysis) -> QualityScore:
     grounding = _verifier_score(a.verification)
+    method = "verifier" if grounding is not None else None
     notes = []
     if grounding is None and a.confidence is not None and a.confidence_source == ConfidenceSource.MODEL_SELF_REPORT:
         notes.append("grounding unavailable: only model self-report confidence")
@@ -97,30 +106,40 @@ def scene_quality(a: SceneAnalysis) -> QualityScore:
         temporal_accuracy=None,  # scene boundaries come from the detector; accuracy of the description over time is not measured
         description_quality=description_quality_score(a.summary),
         notes=notes,
+        grounding_method=method,
     )
 
 
 def event_quality(e: Event) -> QualityScore:
     grounding = _verifier_score(e.verification)
-    if grounding is None and e.confidence is not None and e.confidence_source in (ConfidenceSource.MEASUREMENT, ConfidenceSource.OCR_SCORE, ConfidenceSource.ASR_LOGPROB, ConfidenceSource.DETECTOR_SCORE):
-        grounding = e.confidence  # direct signal measurements are grounding by construction
+    method = "verifier" if grounding is not None else None
+    if grounding is None and e.confidence is not None and e.confidence_source in _INSTRUMENT_SOURCES:
+        # the event text quotes / names what the instrument measured (OCR text, ASR utterance, detected
+        # object, flow label): its recognition score is the grounding evidence, and the method says so
+        grounding = e.confidence
+        method = _INSTRUMENT_SOURCES[ConfidenceSource(e.confidence_source)]
     temporal = e.confidence if e.boundary_precision in ("measured", "asr", "frame") and e.confidence is not None else None
     notes = []
     if e.boundary_precision == "scene":
         notes.append("boundaries inherited from the shot; exact action timing inside the shot unmeasured")
-    return QualityScore.from_components(grounding=grounding, temporal_accuracy=temporal, description_quality=description_quality_score(e.event), notes=notes)
+    return QualityScore.from_components(grounding=grounding, temporal_accuracy=temporal, description_quality=description_quality_score(e.event), notes=notes, grounding_method=method)
 
 
 def relation_quality(conf: float | None, event_qualities: list[QualityScore]) -> QualityScore:
+    """A relation's confidence is interval algebra over its events: it says nothing about whether
+    the event texts are grounded, so ``grounding`` is the minimum of the events' grounding (or None)."""
     temporals = [q.temporal_accuracy for q in event_qualities if q.temporal_accuracy is not None]
+    groundings = [q.grounding for q in event_qualities if q.grounding is not None]
+    grounded = bool(groundings) and len(groundings) == len(event_qualities)
     return QualityScore.from_components(
-        grounding=conf,
+        grounding=round(min(groundings), 3) if grounded else None,
         temporal_accuracy=round(min(temporals), 3) if len(temporals) == len(event_qualities) and temporals else None,
         description_quality=None,
+        grounding_method="derived_min" if grounded else None,
     )
 
 
-def qa_quality(qa: QARecord, grounding: float | None, event_qualities: list[QualityScore]) -> QualityScore:
+def qa_quality(qa: QARecord, grounding: float | None, event_qualities: list[QualityScore], grounding_method: str = "lexical_overlap_v1") -> QualityScore:
     temporals = [q.temporal_accuracy for q in event_qualities if q.temporal_accuracy is not None]
     temporal = round(min(temporals), 3) if temporals and len(temporals) == len(event_qualities) else None
     notes = []
@@ -131,4 +150,5 @@ def qa_quality(qa: QARecord, grounding: float | None, event_qualities: list[Qual
         temporal_accuracy=temporal,
         description_quality=description_quality_score(qa.answer),
         notes=notes,
+        grounding_method=grounding_method if grounding is not None else None,
     )

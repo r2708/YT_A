@@ -26,7 +26,11 @@ from video_dataset.vision.enrichers.clip import (
     clip_phrase,
 )
 from video_dataset.vision.heuristic import HeuristicVisionAnalyzer
-from video_dataset.vision.subject_motion import analyze_subject_motion, apply_subject_motion, subject_motion_from_track
+from video_dataset.vision.subject_motion import (
+    analyze_subject_motion,
+    apply_subject_motion,
+    subject_motion_from_track,
+)
 from video_dataset.vision.tracker import primary_track, track_scene
 
 log = get_logger("vision.cv_models")

@@ -22,9 +22,12 @@ from typing import Any
 
 from video_dataset.schemas.quality import CheckState, ValidationStatus, check_state
 
-POLICY_VERSION = "2026.10.19"
+POLICY_VERSION = "2026.11.02"
 
 # Checks that must be *passed* for a record of this type to be accepted. A missing one -> review.
+# ``sequence`` and ``video_description`` checks, and the QA ``evidence_covers_events`` check, are
+# computed at export time from the exported records (``validation.export_checks``), so shards that
+# were validated before this policy get them on re-annotation.
 REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "scene": (
         "timestamps", "scene_exists", "frames_exist", "frame_files_exist", "summary_present",
@@ -36,7 +39,10 @@ REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "qa": (
         "evidence_timestamps", "timestamps_in_range", "scenes_exist", "events_exist", "frames_exist",
         "frame_files_exist", "has_evidence", "answer_grounded", "question_form", "answer_type",
+        "evidence_covers_events",
     ),
+    "sequence": ("scene_order", "contiguity", "scene_membership", "clip_overlap", "all_shots_accepted"),
+    "video_description": ("scenes_exist", "evidence_resolves", "shots_cover_span", "claims_not_contradicted"),
 }
 
 # Checks whose *absence* is tolerated when the record carries no such thing (no clips cut, no
@@ -47,9 +53,17 @@ _OPTIONAL_WHEN_ABSENT = {"clip_files_exist", "clip_duration_exact", "clip_bounda
 
 # Which checks feed each verification dimension published on every record (``validation.verification``).
 VERIFICATION_DIMENSIONS: dict[str, tuple[str, ...]] = {
-    "temporal": ("timestamps", "clip_boundaries", "clip_duration_exact", "frame_sequence", "evidence_timestamps", "timestamps_in_range"),
-    "measurement": ("visual_quality", "consistent", "camera_motion_agreement", "single_shot", "answer_recomputed", "interval_semantics"),
+    "temporal": ("timestamps", "clip_boundaries", "clip_duration_exact", "frame_sequence", "evidence_timestamps", "timestamps_in_range", "evidence_covers_events", "scene_order", "contiguity", "shots_cover_span"),
+    "measurement": ("visual_quality", "consistent", "camera_motion_agreement", "single_shot", "answer_recomputed", "interval_semantics", "clip_overlap", "scene_membership", "evidence_resolves", "claims_not_contradicted"),
 }
+# ``validation.semantic_verification`` vocabulary. ``measured``: the text *is* a measurement
+# (optical flow, pixel statistics, detector counts); ``template``: the text was phrased by a fixed
+# template from measured / derived fields (no free generation, but the phrasing was not checked
+# against the pixels); ``verifier:<name>``: a verifier judged it; ``human``: a reviewer accepted
+# it; ``not_run``: generated text nobody checked. Only verifier / human are *independent* semantic
+# verification; the release report lists them apart from the heuristic values.
+SEMANTIC_INDEPENDENT = ("human",)
+SEMANTIC_HEURISTIC = ("measured", "template")
 HUMAN_ACCEPT = "human:accepted"
 EXPORT_REEVALUATION = "export"
 
@@ -222,7 +236,7 @@ def enforce_exported(record: dict[str, Any], policy_version: str = POLICY_VERSIO
         why.append("semantic_verification:" + str(v.get("semantic_verification") or "missing"))
     if not why:
         return []
-    v["status"] = ValidationStatus.REVIEW.value
+    record_status_change(record, ValidationStatus.REVIEW.value, "policy:" + ",".join(why[:4]), "export_policy", policy_version)
     v["reason_codes"] = codes + [c for c in why if c not in codes]
     v["policy_version"] = policy_version
     v["reevaluated"] = EXPORT_REEVALUATION
@@ -259,3 +273,22 @@ def _record_kind(record: dict[str, Any]) -> str:
     if rt in ("temporal_qa", "long_video_qa"):
         return "qa"
     return rt or "unknown"
+
+
+def record_status_change(record: dict[str, Any], new_status: str, reason: str, actor: str, policy_version: str = POLICY_VERSION) -> dict[str, Any] | None:
+    """Change ``validation.status`` in place with a trace: appends ``{from, to, reason, actor, at,
+    policy_version}`` to ``validation.history`` and returns that entry (None when nothing changed).
+    Every status change after the validator's verdict goes through here so ``lineage.jsonl`` and the
+    record agree."""
+    from datetime import UTC, datetime
+
+    v = record.get("validation")
+    if not isinstance(v, dict):
+        return None
+    previous = v.get("status")
+    if previous == new_status:
+        return None
+    entry = {"from": previous, "to": new_status, "reason": reason, "actor": actor, "at": datetime.now(UTC).isoformat(timespec="seconds"), "policy_version": policy_version}
+    v["status"] = new_status
+    v.setdefault("history", []).append(entry)
+    return entry

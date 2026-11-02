@@ -2,9 +2,28 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import Field
 
 from video_dataset.schemas.common import BaseSchema, StrEnum
+
+# Version of the scoring rules below and in ``validation.quality``; bump when a component's
+# definition changes so scores of different releases are never compared blindly.
+QUALITY_SCORING_VERSION = "quality-2026.11"
+
+# How a grounding component may be obtained. Anything else is not a grounding score.
+GROUNDING_METHODS = (
+    "verifier",  # a verifier judged the text against the frames (score = its verdict)
+    "instrument:measurement",  # the record *is* a measurement (optical flow, pixel statistics)
+    "instrument:detector_score",  # detector probability of the object the text names
+    "instrument:ocr_score",  # OCR recognition score of the text the record quotes
+    "instrument:asr_logprob",  # ASR log-probability of the utterance the record quotes
+    "lexical_overlap_v1",  # answer tokens found in the evidence texts (QA)
+    "numeric_window_v1",  # numeric answer checked against the evidence window (QA)
+    "derived_min",  # minimum over the grounding of the supporting records
+    "not_assessed",  # no grounding evidence exists for this record (value is None)
+)
 
 
 class QualityScore(BaseSchema):
@@ -12,6 +31,8 @@ class QualityScore(BaseSchema):
 
     `overall` is the mean of the available components only, and `components_used`
     lists which ones contributed, so consumers can tell a measured 0.9 from a guess.
+    ``grounding_method`` names how ``grounding`` was obtained (``GROUNDING_METHODS``); a
+    grounding value without a method, or copied from an unrelated confidence, is a bug.
     """
 
     grounding: float | None = Field(default=None, ge=0, le=1)
@@ -22,6 +43,8 @@ class QualityScore(BaseSchema):
     # Components that could not be measured for this record (never treated as 0 or as a pass).
     missing_components: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    grounding_method: str | None = None
+    scoring_version: str | None = None
 
     @classmethod
     def from_components(
@@ -30,6 +53,7 @@ class QualityScore(BaseSchema):
         temporal_accuracy: float | None = None,
         description_quality: float | None = None,
         notes: list[str] | None = None,
+        grounding_method: str | None = None,
     ) -> QualityScore:
         comps = {
             "grounding": grounding,
@@ -39,6 +63,8 @@ class QualityScore(BaseSchema):
         used = [k for k, v in comps.items() if v is not None]
         values = [float(v) for v in comps.values() if v is not None]
         overall = round(sum(values) / len(values), 4) if values else None
+        if grounding is None:
+            grounding_method = grounding_method or "not_assessed"
         return cls(
             grounding=grounding,
             temporal_accuracy=temporal_accuracy,
@@ -47,6 +73,8 @@ class QualityScore(BaseSchema):
             components_used=used,
             missing_components=[k for k in comps if k not in used],
             notes=notes or [],
+            grounding_method=grounding_method,
+            scoring_version=QUALITY_SCORING_VERSION,
         )
 
 
@@ -111,3 +139,7 @@ class ValidationInfo(BaseSchema):
     verification: dict[str, str] = Field(default_factory=dict)
     # "export" when the acceptance policy re-labelled this record at export time (``enforce_policy``)
     reevaluated: str | None = None
+    # Every status change after the validator's verdict, oldest first: {from, to, reason, actor,
+    # at, policy_version}. The export appends policy downgrades and human labels here and mirrors
+    # them into ``lineage.jsonl`` so a status is never changed without a trace.
+    history: list[dict[str, Any]] = Field(default_factory=list)

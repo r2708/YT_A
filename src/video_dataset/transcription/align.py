@@ -74,3 +74,33 @@ def segments_in_window(transcript: Transcript | None, start: float, end: float, 
 def window_text(segments: list[dict[str, Any]]) -> str | None:
     text = " ".join(str(s["text"]) for s in segments if s.get("text")).strip()
     return text or None
+
+
+def validate_alignment(transcript: Transcript, audio_duration: float | None, tolerance: float = 0.25) -> dict[str, int]:
+    """Check every segment (and its words) against the audio duration, in place.
+
+    ``alignment_status`` per segment: ``within_audio``; ``clamped`` when only the end ran past the
+    audio by at most ``tolerance`` seconds (the end is trimmed); ``outside_audio`` when the segment
+    starts after the audio ends or runs past it by more than the tolerance (kept, flagged, never
+    silently trimmed). ``alignment_confidence`` is the mean word probability when words exist.
+    Speaker ids are left None (no diarization runs). Returns counts per status."""
+    counts = {"within_audio": 0, "clamped": 0, "outside_audio": 0, "not_checked": 0}
+    transcript.audio_duration = audio_duration
+    transcript.alignment_tolerance_seconds = tolerance
+    for seg in transcript.segments:
+        probs = [w.probability for w in seg.words if w.probability is not None]
+        seg.alignment_confidence = round(sum(probs) / len(probs), 4) if probs else None
+        if audio_duration is None or audio_duration <= 0:
+            seg.alignment_status = "not_checked"
+        elif seg.start > audio_duration + tolerance or seg.end > audio_duration + tolerance or seg.end < seg.start:
+            seg.alignment_status = "outside_audio"
+        elif seg.end > audio_duration:
+            seg.end = round(float(audio_duration), 3)
+            for w in seg.words:
+                w.end = min(w.end, seg.end)
+                w.start = min(w.start, w.end)
+            seg.alignment_status = "clamped"
+        else:
+            seg.alignment_status = "within_audio"
+        counts[seg.alignment_status] += 1
+    return counts

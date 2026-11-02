@@ -10,7 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Version of the exported record schemas. Bump the minor part whenever a field is added, the major
 # part whenever a field changes meaning or is removed; every exported record and manifest carries it.
-SCHEMA_VERSION = "2.2.0"
+# Older versions are brought forward by ``schemas.migrations`` (one tested step per version).
+SCHEMA_VERSION = "2.3.0"
 
 
 class StrEnum(str, Enum):
@@ -77,6 +78,40 @@ class Provenance(BaseSchema):
     provider: str | None = None
     version: str | None = None
     generated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
+
+
+class AnnotationProvenance(BaseSchema):
+    """Where an exported record's annotation came from, on the record itself (not only in the
+    manifest): the pipeline build, the component that wrote the text, the template that phrased
+    it and the policy that judged it. ``git_commit`` is the pipeline commit; ``model`` is the
+    analyser / ASR / OCR model when one ran (None for measurement-only providers)."""
+
+    pipeline_version: str | None = None
+    git_commit: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    template_version: str | None = None  # version of the prompt / caption / question template
+    policy_version: str | None = None
+    quality_scoring_version: str | None = None
+    generated_at: str | None = None  # when the record was (re)written by the exporter
+
+
+class RightsInfo(BaseSchema):
+    """Rights status of the source video, carried on every record derived from it.
+
+    ``status`` follows ``curation.RIGHTS_STATUSES`` (declared_cc_by | restricted | unknown |
+    removed, plus ``verified_cc_by`` when a human recorded evidence). ``method`` says where the
+    status came from: ``platform_declared`` (the platform's own licence field, read at download
+    time) or ``human_evidence`` (a row in ``rights_evidence.jsonl``). ``allowed_use`` and
+    ``redistribution`` are derived from the status by ``curation.rights_terms``."""
+
+    status: str = "unknown"
+    license: str | None = None
+    verified_at: str | None = None
+    method: str | None = None
+    allowed_use: str | None = None
+    redistribution: str | None = None  # allowed | blocked
+    evidence_url: str | None = None
 
 
 def utc_now_iso() -> str:

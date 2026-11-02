@@ -16,6 +16,7 @@ class OCRDetection(BaseSchema):
     confidence: float | None = Field(default=None, ge=0, le=1)
     confidence_source: ConfidenceSource = ConfidenceSource.OCR_SCORE
     bbox: list[float] = Field(default_factory=list)  # [x_min, y_min, x_max, y_max] in frame pixels
+    frame_size: list[int] = Field(default_factory=list)  # [width, height] of the image the bbox refers to (empty = unknown)
 
 
 class OCRTrack(BaseSchema):
@@ -46,6 +47,7 @@ class OCRTrack(BaseSchema):
 class OCRResult(BaseSchema):
     video_id: str
     engine: str
+    engine_version: str | None = None  # installed package version of the engine (provenance of every bbox / score)
     frames_processed: int
     detections: list[OCRDetection] = Field(default_factory=list)
     tracks: list[OCRTrack] = Field(default_factory=list)

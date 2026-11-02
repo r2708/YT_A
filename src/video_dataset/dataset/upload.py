@@ -105,6 +105,27 @@ def media_dirs(data_dir: Path, videos: list[str]) -> list[tuple[Path, str]]:
     return out
 
 
+def rights_cleared_videos(final_dir: Path, videos: list[str], release_rights: list[str] | tuple[str, ...]) -> tuple[list[str], dict[str, str]]:
+    """The subset of ``videos`` whose rights status (provenance.jsonl, else manifest.json) is in
+    ``release_rights``: the only videos whose frames / clips may leave the producer's machine.
+    Returns (cleared video ids, {video_id: rights_status})."""
+    status: dict[str, str] = {}
+    prov = final_dir / "provenance.jsonl"
+    if prov.exists():
+        for row in read_jsonl(prov):
+            if row.get("video_id"):
+                status[str(row["video_id"])] = str(row.get("rights_status") or "unknown")
+    manifest = final_dir / "manifest.json"
+    if manifest.exists():
+        try:
+            for m in read_json(manifest).get("videos", []):
+                status.setdefault(str(m.get("video_id")), str(m.get("rights_status") or "unknown"))
+        except (ValueError, AttributeError):
+            pass
+    allowed = {str(r) for r in release_rights}
+    return [v for v in videos if status.get(v, "unknown") in allowed], {v: status.get(v, "unknown") for v in videos}
+
+
 def measure_shard(final_dir: Path, data_dir: Path, include_media: bool) -> tuple[int, int, list[str]]:
     """Returns (bytes, files, video_ids) of the current shard."""
     total = 0
@@ -149,8 +170,12 @@ def _link_tree(src_dir: Path, dst_dir: Path) -> int:
     return n
 
 
-def stage_shard(final_dir: Path, data_dir: Path, videos: list[str], include_media: bool, staging: Path) -> int:
-    """Hard-link (or copy) everything that belongs to the current shard into `staging`. Returns file count."""
+def stage_shard(final_dir: Path, data_dir: Path, videos: list[str], include_media: bool, staging: Path, release_rights: list[str] | tuple[str, ...] | None = None, rights_gate: bool = True) -> int:
+    """Hard-link (or copy) everything that belongs to the current shard into `staging`. Returns file count.
+
+    With ``include_media`` and ``rights_gate`` only the frames / clips of videos whose rights
+    status is in ``release_rights`` are staged (``licensing.media_policy``); the annotations of the
+    other videos ship without their media, and ``media_rights.json`` in the shard says which."""
     staging.mkdir(parents=True, exist_ok=True)
     n = 0
     for name in DATASET_ROOT_FILES:
@@ -167,9 +192,17 @@ def stage_shard(final_dir: Path, data_dir: Path, videos: list[str], include_medi
         if d.exists():
             n += _link_tree(d, staging / "per_video" / vid)
     if include_media:
-        for d, rel in media_dirs(data_dir, videos):
+        media_videos = list(videos)
+        if rights_gate:
+            media_videos, status = rights_cleared_videos(final_dir, videos, release_rights or ())
+            blocked = {v: s for v, s in status.items() if v not in media_videos}
+            write_json_atomic(staging / "media_rights.json", {"release_rights": list(release_rights or ()), "media_shipped_for": media_videos, "media_blocked_for": blocked, "note": "frames/clips are shipped only for sources whose rights_status is in release_rights; the other sources are metadata-only"})
+            n += 1
+            if blocked:
+                log.info("media rights gate: shipping media for %d of %d videos (%d blocked: %s)", len(media_videos), len(videos), len(blocked), ", ".join(sorted(set(blocked.values()))))
+        for d, rel in media_dirs(data_dir, media_videos):
             n += _link_tree(d, staging / rel)
-        n += write_media_metadata(final_dir, staging, set(videos))
+        n += write_media_metadata(final_dir, staging, set(media_videos))
     return n
 
 
@@ -254,6 +287,41 @@ class HuggingFaceUploader:
         )
         return str(getattr(info, "commit_url", None) or info)
 
+    def remote_checksums(self, path_in_repo: str) -> dict[str, str | None]:
+        """{path relative to the shard: sha256} as the Hub reports it. LFS files carry their sha256;
+        small (non-LFS) files only have a git blob id, reported as None (not verifiable this way)."""
+        out: dict[str, str | None] = {}
+        prefix = path_in_repo.strip("/") + "/"
+        for item in self.api.list_repo_tree(self.repo_id, path_in_repo=path_in_repo, repo_type=self.cfg.repo_type, recursive=True, expand=True):
+            if item.__class__.__name__ != "RepoFile":
+                continue
+            lfs = getattr(item, "lfs", None)
+            sha = getattr(lfs, "sha256", None) if lfs is not None else (lfs or {}).get("sha256") if isinstance(lfs, dict) else None
+            out[item.path[len(prefix):] if item.path.startswith(prefix) else item.path] = sha
+        return out
+
+
+def verify_remote_checksums(uploader: Any, path_in_repo: str, local: dict[str, str]) -> dict[str, Any]:
+    """Compare the staged shard's checksums.sha256 with what the Hub stores (P3-09: verify after
+    upload). Non-LFS files cannot be verified by hash and are counted as ``unverifiable``."""
+    remote = uploader.remote_checksums(path_in_repo)
+    mismatched = [p for p, sha in local.items() if remote.get(p) and remote[p] != sha]
+    missing = [p for p in local if p not in remote]
+    verified = sum(1 for p, sha in local.items() if remote.get(p) and remote[p] == sha)
+    unverifiable = sum(1 for p in local if p in remote and not remote[p])
+    return {"ok": not mismatched and not missing, "verified": verified, "unverifiable": unverifiable, "mismatched": mismatched, "missing_on_hub": missing}
+
+
+def _read_stats(final_dir: Path) -> dict[str, Any] | None:
+    p = final_dir / "statistics.json"
+    if not p.exists():
+        return None
+    try:
+        data = read_json(p)
+        return data if isinstance(data, dict) else None
+    except (ValueError, OSError):
+        return None
+
 
 def card_configs(cfg: UploadConfig) -> str:
     """The `configs:` entries of the dataset card: one loader config per record type, reading the
@@ -281,10 +349,48 @@ def merge_card_configs(readme: str, cfg: UploadConfig) -> str:
     return f"---\n{fm}---\n{readme[m.end():]}"
 
 
-def dataset_card(cfg: UploadConfig, config: PipelineConfig) -> str:
+def _coverage_section(stats: dict[str, Any] | None) -> str:
+    """Cinematic coverage, human verification and task exports of the *current shard* as measured
+    in statistics.json: the card may only claim what was counted (issue P1-12, P1-07, §6)."""
+    if not stats:
+        return ""
+    lines: list[str] = []
+    cov = stats.get("cinematic_coverage") or {}
+    if cov:
+        lines += ["## Cinematic subset coverage (this shard, measured)", "", f"unique clips: {cov.get('unique_clips', 0)}, scenes: {cov.get('unique_scenes', 0)}, videos: {cov.get('videos', 0)}, hours: {cov.get('hours', 0)}; camera label verified by flow: {cov.get('camera_verified', 0)}, ambiguous: {cov.get('camera_ambiguous', 0)}", ""]
+        for key, title in (("by_camera_movement", "camera movement"), ("by_shot_size", "shot size"), ("by_lighting_level", "lighting level"), ("by_setting", "setting")):
+            d = cov.get(key) or {}
+            if d:
+                lines.append(f"| {title} | clips | hours |\n|---|---|---|")
+                lines += [f"| {k} | {v['clips']} | {v['hours']} |" for k, v in list(d.items())[:12]]
+                lines.append("")
+        lines.append(f"_{cov.get('note', '')}_")
+        lines.append("")
+    hv = stats.get("human_verification") or {}
+    if hv.get("status") and hv.get("status") != "not_run":
+        ag = hv.get("agreement") or {}
+        lines += ["## Human verification", "", f"protocol {hv.get('protocol_version')}: sample {hv.get('sample_size')}, labelled {hv.get('labelled')}, double-annotated {hv.get('double_annotated')}, percent agreement {ag.get('percent_agreement')}, kappa {ag.get('kappa_binary')}, unresolved disagreements {hv.get('unresolved_disagreements')}", ""]
+    else:
+        lines += ["## Human verification", "", "No stratified human review sample has been labelled for this shard yet: every `accepted` status is the automated policy's verdict (`validation.verification.human: not_run`). Independent semantic verification exists only where `validation.semantic_verification` is `human`.", ""]
+    te = stats.get("task_exports") or {}
+    if te:
+        lines += ["## Task exports (`exports/<task>/`)", "", "| task | eligible records |", "|---|---|"]
+        lines += [f"| {k} | {v.get('eligible_total', 0)} |" for k, v in te.items()]
+        lines += ["", "Each export carries `filters.json` (eligibility policy, counts by status and exclusion reason) and a README with the task definition. `generation_ready` requires decodable, rights-cleared media: metadata-only records are not a substitute for video input.", ""]
+    return "\n".join(lines)
+
+
+def dataset_card(cfg: UploadConfig, config: PipelineConfig, stats: dict[str, Any] | None = None) -> str:
     name = (cfg.repo_id or "dataset").split("/")[-1]
+    lic = config.licensing
     return f"""---
 pretty_name: {name}
+license: other
+license_name: mixed-annotations-{str(lic.annotation_license).lower()}-media-per-source
+license_details: >-
+  Annotations and metadata written by the pipeline: {lic.annotation_license}. Pipeline code: {lic.code_license}.
+  Source videos keep their own licence (provenance.jsonl: rights_status, allowed_use, redistribution, evidence_url);
+  no licence here grants rights to the underlying videos, audio, transcripts or on-screen text.
 configs:
 {card_configs(cfg)}
 ---
@@ -329,28 +435,41 @@ fields only. Camera annotations use one vocabulary for every provider: `camera_m
 clips: the first and last frames were located in the source video, `boundary_check: passed`);
 anything unverified is `review` with the missing checks in `validation.reason_codes`.
 `validation.verification` separates temporal, measurement, semantic and human verification; a null
-quality component is unmeasured, never zero (`quality.missing_components`). `manifest.json` carries
-the tier policy, the licence scopes and, per shard, the exact per-type record counts (empty types
-are listed in `empty_record_types` and ship as empty files).
+quality component is unmeasured, never zero (`quality.missing_components`), and `quality.grounding`
+always names its `grounding_method`. `validation.semantic_verification` is `measured` / `template`
+for heuristic text, `verifier:<name>` or `human` for independent checks, `not_run` otherwise.
+Ambiguous camera labels (zoom vs dolly, tracking vs pan, inconsistent flow) carry
+`camera.movement_ambiguous: true` and stay in review. Every record carries `provenance` (pipeline
+commit, template and policy versions), `rights` (status, method, allowed use, redistribution,
+evidence URL), `temporal_validation` and, for shots, `continuity`. `manifest.json` carries the
+release id, the pipeline commit, the tier policy, the licence scopes and, per shard, the exact
+per-type record counts; `checksums.sha256` / `inventory.json` list every file with its SHA-256,
+`lineage.jsonl` every status change, `release_report.json` the gate results with the explicit
+release status (`passed`, `passed_with_exclusions`, `blocked`) and the exclusions.
 
+{_coverage_section(stats)}
 ## Licensing and rights
 
 | scope | licence |
 |---|---|
 | pipeline code | {config.licensing.code_license} |
 | annotations and metadata written by the pipeline (captions, events, QA, measurements) | {config.licensing.annotation_license} |
-| source videos | each video keeps its own licence: `license`, `license_status`, `rights_status` and the URL are in `provenance.jsonl` |
-| redistributed media (frames, clips, transcripts, on-screen text) | {config.licensing.media_policy} |
+| transcripts and on-screen text | derived from the source audio / frames: follow the source video's rights, not the annotation licence |
+| source videos | each video keeps its own licence: `license`, `license_status`, `rights_status`, `allowed_use`, `redistribution`, `evidence_url` are in `provenance.jsonl` and on every record (`rights`) |
+| redistributed media (frames, clips) | {config.licensing.media_policy}; shipped shards list what was included in `media_rights.json` |
 
 The annotation licence grants no rights to the underlying videos, audio, transcripts or on-screen
-text. Only public video metadata (title, channel, duration, license) is stored. Obtain permission
+text. Only public video metadata (title, channel, duration, license) is stored. `declared_cc_by`
+means the platform declared a CC-BY licence; it is evidence, not verification. Obtain permission
 from the rights holder before redistributing media, and seek legal review before commercial use.
 """
 
 
 # ----------------------------------------------------------------------------- orchestration
-def _rotate(final_dir: Path, data_dir: Path, videos: list[str], include_media: bool, mode: str, index: int) -> tuple[int, int]:
-    """Move (archive) or delete the uploaded shard so final/ starts empty. Returns (paths moved/removed, bytes)."""
+def _rotate(final_dir: Path, data_dir: Path, videos: list[str], include_media: bool, mode: str, index: int, media_videos: list[str] | None = None) -> tuple[int, int]:
+    """Move (archive) or delete the uploaded shard so final/ starts empty. Returns (paths moved/removed, bytes).
+    In delete mode only the media that was actually shipped (``media_videos``) is removed: media the
+    rights gate held back stays on disk, it is the only copy."""
     archive = final_dir / UPLOADED_DIR / shard_name(index)
     moved = 0
     size = 0
@@ -368,7 +487,7 @@ def _rotate(final_dir: Path, data_dir: Path, videos: list[str], include_media: b
         if d.exists():
             targets.append((d, archive / "per_video" / vid))
     if mode == "delete" and include_media:
-        for d, rel in media_dirs(data_dir, videos):
+        for d, rel in media_dirs(data_dir, videos if media_videos is None else media_videos):
             targets.append((d, archive / rel))
     for src, dst in targets:
         size += _dir_size(src) if src.is_dir() else src.stat().st_size
@@ -447,22 +566,41 @@ def check_and_upload(
 
     staging = Path(tempfile.mkdtemp(prefix=f"vd-upload-{shard_name(index)}-", dir=str(final_dir)))
     t0 = time.time()
+    checksum_result: dict[str, Any] | None = None
     try:
-        staged = stage_shard(final_dir, data_dir, videos, bool(cfg.include_media), staging)
+        staged = stage_shard(final_dir, data_dir, videos, bool(cfg.include_media), staging, release_rights=list(config.licensing.release_rights or []), rights_gate=bool(getattr(config.licensing, "media_rights_gate", True)))
+        # the shard's own inventory: every staged file with its sha256 (verified on the Hub after the upload)
+        from video_dataset.dataset.inventory import read_checksums, write_inventory
+
+        write_inventory(staging, include_media=True)
+        staged += 2
+        local_sums = read_checksums(staging / "checksums.sha256")
         log.info("uploading %s: %d file(s), %.1f MB, %d video(s) -> %s/%s", shard_name(index), staged, size / 1e6, len(videos), cfg.repo_id, path_in_repo)
         repo_url = retry_call(uploader.ensure_repo, retries=2, base_delay=2.0, label="create repo")
-        card_added = retry_call(lambda: uploader.ensure_card(dataset_card(cfg, config)), retries=2, base_delay=2.0, label="dataset card")
+        card_added = retry_call(lambda: uploader.ensure_card(dataset_card(cfg, config, _read_stats(final_dir))), retries=2, base_delay=2.0, label="dataset card")
         message = f"Add {shard_name(index)}: {len(videos)} video(s), {size / 1e6:.1f} MB"
         commit = retry_call(lambda: uploader.upload_dir(staging, path_in_repo, message), retries=int(cfg.retries), base_delay=5.0, max_delay=120.0, label="upload shard")
+        if getattr(cfg, "verify_checksums", True) and hasattr(uploader, "remote_checksums"):
+            try:
+                checksum_result = verify_remote_checksums(uploader, path_in_repo, local_sums)
+                if checksum_result["mismatched"]:
+                    log.error("checksum verification after upload: %d file(s) differ on the Hub: %s", len(checksum_result["mismatched"]), ", ".join(checksum_result["mismatched"][:5]))
+                else:
+                    log.info("checksum verification after upload: %d LFS file(s) match, %d not verifiable (non-LFS)", checksum_result["verified"], checksum_result["unverifiable"])
+            except Exception as exc:  # the upload itself succeeded; verification is best effort and recorded
+                checksum_result = {"error": str(exc)[:200]}
+                log.warning("checksum verification after upload failed: %s", str(exc)[:200])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     elapsed = time.time() - t0
 
-    moved, rotated_bytes = _rotate(final_dir, data_dir, videos, bool(cfg.include_media), mode, index)
+    shipped_media = rights_cleared_videos(final_dir, videos, list(config.licensing.release_rights or []))[0] if (cfg.include_media and getattr(config.licensing, "media_rights_gate", True)) else videos
+    moved, rotated_bytes = _rotate(final_dir, data_dir, videos, bool(cfg.include_media), mode, index, media_videos=shipped_media)
     state.shards.append({
         "index": index, "name": shard_name(index), "path_in_repo": path_in_repo, "repo_id": cfg.repo_id, "videos": videos,
         "bytes": size, "files": staged, "commit": commit, "uploaded_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "seconds": round(elapsed, 1), "after_upload": mode,
+        "checksum_verified": (checksum_result or {}).get("ok"), "checksum_verification": checksum_result,
     })
     state.next_shard = index + 1
     state.save(final_dir)

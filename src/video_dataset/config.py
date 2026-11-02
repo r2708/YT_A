@@ -155,6 +155,10 @@ class TranscriptionConfig(_Section):
     min_segment_confidence: float = 0.0
     initial_prompt: str | None = None  # bias vocabulary/script, e.g. "नमस्ते, आज हम बात करेंगे" for Devanagari Hindi
     device: str | None = None  # None -> project.device
+    # Segments / words are checked against the audio duration: an end past the audio by at most
+    # this many seconds is clamped (``alignment_status: clamped``), anything further is flagged
+    # ``outside_audio`` and kept.
+    alignment_tolerance_seconds: float = 0.25
 
 
 class AudioEventsConfig(_Section):
@@ -367,6 +371,10 @@ class LicensingConfig(_Section):
     code_license: str = "MIT"
     annotation_license: str = "MIT"
     media_policy: str = "per-video: only sources with rights_status in release_rights may be redistributed; everything else is metadata-only"
+    # Enforce media_policy: with upload.include_media (or `package --include-media`) only the frames
+    # and clips of videos whose rights_status is in release_rights are shipped; the release gate
+    # `rights` fails when shipped media belongs to any other video.
+    media_rights_gate: bool = True
 
 
 class DeduplicationConfig(_Section):
@@ -399,6 +407,10 @@ class SplitConfig(_Section):
     min_validation_videos: int = 1  # source groups the validation split must hold (0 = fractions only)
     min_test_videos: int = 1
     required_splits: list[str] = Field(default_factory=lambda: ["train", "validation", "test"])  # splits that must be non-empty at release
+    # Group by channel / creator as well: every video of one channel (and the near-duplicates of
+    # those videos) lands in one split, so re-uploads and series from one creator never straddle
+    # train and test. Videos without a known channel group by themselves.
+    group_by_channel: bool = True
 
 
 class TierConfig(_Section):
@@ -481,6 +493,12 @@ class ExportConfig(_Section):
     # Minimum number of source videos an export must hold before `release-check` passes (0 disables).
     # Thousands of clips from a handful of videos are not a general-purpose dataset.
     min_source_videos: int = 50
+    # --- release tooling written next to the dataset files (issue doc sections 3, 5, 6, 7) ---
+    inventory: bool = True  # inventory.json + checksums.sha256 of every exported file (verified by release-check)
+    task_exports: bool = True  # final/exports/<task>/: understanding, temporal_reasoning, cinematic, generation_ready
+    benchmark: bool = True  # final/benchmark/: held-out, human-verified evaluation items (empty until labels exist)
+    lineage: bool = True  # append every status change of this export to final/lineage.jsonl
+    review_history: bool = True  # append the review rate per type to final/review_history.jsonl (measures repair progress)
 
 
 class UploadConfig(_Section):
@@ -499,6 +517,9 @@ class UploadConfig(_Section):
     # Run the release gates (schema, record ids JSONL == Parquet, split leakage, and - with
     # include_media - media references) before every upload; a failing gate aborts the upload.
     release_gate: bool = True
+    # After the upload, compare the sha256 of every LFS file on the Hub with checksums.sha256 of the
+    # staged shard (recorded in uploads.json as ``checksum_verified``; mismatches are logged).
+    verify_checksums: bool = True
 
 
 class CleanupConfig(_Section):

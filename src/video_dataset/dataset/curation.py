@@ -46,6 +46,64 @@ def rights_status_for(license_status: str | None, source_type: str | None = None
     return "unknown"
 
 
+# What each rights status permits, published on every record (``rights`` block) and in the card.
+RIGHTS_TERMS: dict[str, tuple[str, str]] = {
+    "verified_cc_by": ("reuse and redistribution with attribution (licence verified by a reviewer)", "allowed"),
+    "declared_cc_by": ("reuse with attribution as declared by the platform; verify before commercial use", "allowed"),
+    "restricted": ("view on the platform only; annotations may be used, media may not be redistributed", "blocked"),
+    "unknown": ("none until the rights are verified; annotations only", "blocked"),
+    "removed": ("none: the source was removed (takedown)", "blocked"),
+}
+RIGHTS_EVIDENCE_FILE = "rights_evidence.jsonl"
+
+
+def rights_terms(status: str | None) -> tuple[str, str]:
+    return RIGHTS_TERMS.get(str(status or "unknown"), RIGHTS_TERMS["unknown"])
+
+
+def load_rights_evidence(final_dir: Any) -> dict[str, dict[str, Any]]:
+    """Human-recorded rights evidence per video (``final/rights_evidence.jsonl``: ``video_id``,
+    ``status`` (verified_cc_by | restricted | removed ...), ``verified_at``, ``evidence_url``,
+    ``verified_by``, optional ``license``). It overrides the platform declaration."""
+    from pathlib import Path
+
+    from video_dataset.utils.io import read_jsonl
+
+    p = Path(final_dir) / RIGHTS_EVIDENCE_FILE
+    out: dict[str, dict[str, Any]] = {}
+    if not p.exists():
+        return out
+    for row in read_jsonl(p):
+        vid = str(row.get("video_id") or "")
+        if vid and row.get("status"):
+            out[vid] = {"status": str(row["status"]), "verified_at": row.get("verified_at"), "evidence_url": row.get("evidence_url"), "verified_by": row.get("verified_by"), "license": row.get("license")}
+    return out
+
+
+def rights_info_for(vinfo: dict[str, Any]) -> dict[str, Any]:
+    """The ``rights`` block of a record from the per-video curation facts (``video_info``)."""
+    evidence = vinfo.get("rights_evidence") or {}
+    status = str(evidence.get("status") or vinfo.get("rights_status") or rights_status_for(vinfo.get("license_status")))
+    allowed_use, redistribution = rights_terms(status)
+    return {
+        "status": status,
+        "license": evidence.get("license") or vinfo.get("license"),
+        "verified_at": evidence.get("verified_at") or (vinfo.get("retrieved_at") if not evidence else None),
+        "method": "human_evidence" if evidence else "platform_declared",
+        "allowed_use": allowed_use,
+        "redistribution": redistribution,
+        "evidence_url": evidence.get("evidence_url") or vinfo.get("url"),
+    }
+
+
+def channel_group_id(channel: str | None) -> str | None:
+    """Stable split-group id of a channel / creator (lower-cased, whitespace collapsed)."""
+    if not channel:
+        return None
+    slug = " ".join(str(channel).strip().lower().split())
+    return f"channel:{slug}" if slug else None
+
+
 def duration_band(duration: float | None, bands: dict[str, list[float]]) -> str | None:
     if duration is None:
         return None
@@ -247,45 +305,104 @@ def video_info_from_manifests(manifests: list[dict[str, Any]], similarity_thresh
 
 
 # ------------------------------------------------------------------------------------ driver
+def _group_id(vid: str, vinfo: dict[str, Any], by_channel: bool) -> str:
+    """Split group of a video: its near-duplicate canonical video, else its channel (when channel
+    grouping is on and the channel is known), else the video itself. Near-duplicates of a video
+    from another channel follow the canonical video's group."""
+    canonical = vinfo.get("canonical_video_id") or None
+    if canonical and canonical != vid:
+        return str(canonical)
+    if by_channel:
+        ch = channel_group_id(vinfo.get("channel"))
+        if ch:
+            return ch
+    return vid
+
+
+def _provenance_block(rec: dict[str, Any], base: dict[str, Any] | None, now: str) -> dict[str, Any]:
+    from video_dataset.dataset.prompting import TEMPLATE_VERSION
+    from video_dataset.schemas.quality import QUALITY_SCORING_VERSION
+    from video_dataset.validation.policy import POLICY_VERSION
+
+    base = base or {}
+    v = rec.get("validation") if isinstance(rec.get("validation"), dict) else {}
+    q = rec.get("quality") if isinstance(rec.get("quality"), dict) else {}
+    template = rec.get("template_id") or (TEMPLATE_VERSION if rec.get("generation_prompt") or rec.get("prompt") else None)
+    if rec.get("generator"):
+        template = f"{rec.get('generator')}:{rec.get('template_id') or 'unknown'}"
+    return {
+        "pipeline_version": base.get("pipeline_version"),
+        "git_commit": base.get("git_commit"),
+        "provider": rec.get("provider") or rec.get("generator"),
+        "model": base.get("models", {}).get(str(rec.get("provider")), None) if isinstance(base.get("models"), dict) else None,
+        "template_version": template,
+        "policy_version": v.get("policy_version") or POLICY_VERSION,
+        "quality_scoring_version": q.get("scoring_version") or QUALITY_SCORING_VERSION if q else None,
+        "generated_at": now,
+    }
+
+
 def annotate_records(
     records: dict[str, list[dict[str, Any]]],
     cfg: ExportConfig,
     video_info: dict[str, dict[str, Any]] | None = None,
     licensing: LicensingConfig | None = None,
     seed: int | str = 1234,
+    provenance_base: dict[str, Any] | None = None,
+    calibration: dict[str, Any] | None = None,
 ) -> dict[str, int]:
     """Fill split / tier / tier_reasons / subsets / canonical_video_id on every record dict in place,
-    link frames to their clip, attach generation prompts (+ variants) to scene / clip records and
-    (re)build the ``sequences`` records.
+    link frames to their clip, attach generation prompts (+ variants) to scene / clip records,
+    (re)build the ``sequences`` records, run the export-time checks (timestamps, sequence /
+    description / QA evidence checks), fill continuity, provenance, rights and calibration blocks.
 
     ``video_info`` (per video id): ``canonical_video_id`` for near-duplicate videos (their records
-    get the canonical video's split and a bronze cap), ``license_status`` (the ``licensed`` subset)
-    and ``quality_flags`` of the source. Returns counts.
+    get the canonical video's split and a bronze cap), ``license_status`` (the ``licensed`` subset),
+    ``quality_flags`` of the source, ``channel`` (split grouping), ``duration`` (timestamp checks),
+    ``rights_evidence`` (human rights record). ``provenance_base`` is the pipeline build
+    (``pipeline_version``, ``git_commit``, ``models``) and ``calibration`` the parsed
+    ``calibration.json`` (``by_source`` keys ``<source>|<type>``). Returns counts.
     """
+    from video_dataset.dataset.continuity import fill_continuity
     from video_dataset.dataset.prompting import fill_frame_clip_ids, fill_generation_prompts
     from video_dataset.dataset.sequences import build_sequences
     from video_dataset.dataset.variations import fill_prompt_variants
+    from video_dataset.schemas.common import utc_now_iso
+    from video_dataset.validation.export_checks import fill_export_checks
 
     video_info = video_info or {}
     allowed = {str(a).lower() for a in ((licensing.allowed if licensing else []) or [])}
     licensed_subset = bool(licensing.subset) if licensing else True
+    now = utc_now_iso()
 
     fill_frame_clip_ids(records)
     fill_generation_prompts(records)
     records["sequences"] = build_sequences(records, cfg.sequences) if cfg.sequences.enabled else []
     fill_prompt_variants(records, int(cfg.prompt_variants), seed)
+    # video descriptions: the clips of their scenes are their evidence too
+    clips_by_scene: dict[tuple[str, str], list[str]] = {}
+    for rec in records.get("clips", []):
+        clips_by_scene.setdefault((str(rec.get("video_id")), str(rec.get("scene_id"))), []).append(str(rec.get("clip_id")))
+    for rec in records.get("video_descriptions", []):
+        ev = rec.get("evidence") if isinstance(rec.get("evidence"), dict) else {}
+        ev = {"scene_ids": list(rec.get("scene_ids") or []), "clip_ids": [], "frame_ids": [], "timestamps": [], **ev}
+        ev["clip_ids"] = [c for sid in (rec.get("scene_ids") or []) for c in clips_by_scene.get((str(rec.get("video_id")), str(sid)), [])]
+        rec["evidence"] = ev
+    durations = {vid: float(vi["duration"]) for vid, vi in video_info.items() if vi.get("duration")}
+    check_counts = fill_export_checks(records, durations)
+    continuity_counts = fill_continuity(records)
 
-    counts = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0, "strict": 0, "dropped_rights_records": 0, "policy_downgraded": 0}
+    counts = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0, "strict": 0, "dropped_rights_records": 0, "policy_downgraded": 0, "export_checks": check_counts, "continuity": continuity_counts}
     enforce = bool(getattr(cfg, "enforce_policy", True))
+    by_channel = bool(getattr(cfg.split, "group_by_channel", False))
+    calibrated = set((calibration or {}).get("by_source", {}).keys()) if isinstance(calibration, dict) else set()
+    calibration_version = str((calibration or {}).get("version") or "") if isinstance(calibration, dict) else ""
     group_ids: set[str] = set()
     for rows in records.values():
         for rec in rows:
             vid = str(rec.get("video_id") or "")
-            canonical = video_info.get(vid, {}).get("canonical_video_id") or None
-            if vid and canonical != vid:
-                group_ids.add(canonical or vid)
-            elif vid:
-                group_ids.add(vid)
+            if vid:
+                group_ids.add(_group_id(vid, video_info.get(vid, {}), by_channel))
     splits = assign_splits(group_ids, cfg.split) if cfg.split.enabled else {}
     dup_videos: set[str] = set()
     licensed_videos: set[str] = set()
@@ -306,15 +423,20 @@ def annotate_records(
                 if cfg.exclude_duplicate_videos:
                     counts["dropped_duplicate_records"] += 1
                     continue
-            rights = str(vinfo.get("rights_status") or rights_status_for(vinfo.get("license_status")))
+            rights_block = rights_info_for(vinfo)
+            rights = str(rights_block["status"])
             if getattr(cfg, "require_rights", False) and rights not in release_rights:
                 counts["dropped_rights_records"] += 1
                 continue
-            split_id = canonical or vid
+            split_id = _group_id(vid, vinfo, by_channel) if vid else None
             rec["source_group_id"] = split_id or None
             rec["schema_version"] = SCHEMA_VERSION
             rec["coverage"] = dict(vinfo.get("coverage") or rec.get("coverage") or {})
             rec["split"] = splits[split_id].value if cfg.split.enabled and split_id in splits else None
+            rec["rights"] = rights_block
+            rec["provenance"] = _provenance_block(rec, provenance_base, now)
+            key = f"{rec.get('confidence_source') or 'unavailable'}|{kind}"
+            rec["confidence_calibration"] = (f"calibrated:{calibration_version or 'unknown'}" if key in calibrated else "uncalibrated") if rec.get("confidence") is not None else None
             if enforce and enforce_exported(rec):
                 counts["policy_downgraded"] += 1
             v = rec.get("validation")
@@ -323,6 +445,8 @@ def annotate_records(
             q = rec.get("quality")
             if isinstance(q, dict):
                 q["missing_components"] = [c for c in QUALITY_COMPONENTS if q.get(c) is None]
+                if q.get("grounding") is None and not q.get("grounding_method"):
+                    q["grounding_method"] = "not_assessed"
             if cfg.tiers.enabled:
                 tier, reasons = tier_for_record(rec, cfg.tiers)
                 if canonical:

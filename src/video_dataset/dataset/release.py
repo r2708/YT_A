@@ -19,11 +19,19 @@
 * portable paths: no metadata file or record carries a machine-specific path (``/Users/...``,
   ``/home/...``, drive letters);
 * accepted means verified: no ``accepted`` record lacks a policy version, a passed boundary check
-  (clips) or a required check.
+  (clips) or a required check;
+* checksums: ``checksums.sha256`` lists every dataset file and still verifies;
+* timestamps: no accepted record failed the export-time temporal validation;
+* rights: every record carries its rights block; shipped media only belongs to release-rights sources;
+* reproducibility: the manifest names the pipeline commit, release id, schema and policy versions.
 
-Each gate yields ``passed`` / ``failed`` / ``skipped`` with counts; ``ok`` is the conjunction of
-the required gates. The report also carries the quality metrics a release should publish:
-status / reason-code / coverage / duration / split / tier / rights distributions.
+Each gate yields ``passed`` / ``failed`` / ``skipped`` with counts. The report's ``status`` is
+``blocked`` (a gate failed), ``passed_with_exclusions`` (every gate passed but records were
+downgraded, left in review, kept unmigrated, had missing media or ambiguous camera labels: the
+``exclusions`` block discloses them) or ``passed``. It also carries the human-verification summary
+(sample, agreement, unresolved disagreements), the repair-queue counts and the quality metrics a
+release should publish: status / reason-code / semantic-verification split / grounding methods /
+coverage / duration / split / tier / rights distributions.
 """
 
 from __future__ import annotations
@@ -75,6 +83,7 @@ def _gate(name: str, ok: bool | None, **details: Any) -> dict[str, Any]:
 def schema_gate(records: dict[str, list[dict[str, Any]]], max_examples: int = 20) -> dict[str, Any]:
     bad: list[dict[str, Any]] = []
     checked = 0
+    n_unmigrated = 0
     versions: dict[str, int] = {}
     for name, rows in records.items():
         model = RECORD_MODELS.get(name)
@@ -94,7 +103,7 @@ def schema_gate(records: dict[str, list[dict[str, Any]]], max_examples: int = 20
             start = getattr(obj, "start_time", None)
             end = getattr(obj, "end_time", None)
             ev = getattr(obj, "evidence", None)
-            if ev is not None:
+            if ev is not None and hasattr(ev, "start_time"):  # QA evidence (descriptions carry an evidence *dict* of ids)
                 start, end = ev.start_time, ev.end_time
             if start is not None and end is not None and (float(start) < 0 or float(end) < float(start)):
                 if len(bad) < max_examples:
@@ -103,8 +112,15 @@ def schema_gate(records: dict[str, list[dict[str, Any]]], max_examples: int = 20
             if conf is not None and not (0.0 <= float(conf) <= 1.0):
                 if len(bad) < max_examples:
                     bad.append({"type": name, "record_id": rec.get("record_id"), "error": f"confidence {conf} outside [0, 1]"})
-    n_bad = sum(1 for _ in bad)
-    return _gate("schema", n_bad == 0, records_checked=checked, invalid=n_bad, examples=bad, schema_versions=versions, expected_schema_version=SCHEMA_VERSION)
+            if isinstance(rec.get("extensions"), dict) and rec["extensions"].get("_schema_error"):
+                n_unmigrated += 1
+                if len(bad) < max_examples:
+                    bad.append({"type": name, "record_id": rec.get("record_id"), "error": "kept verbatim after a failed migration: " + str(rec["extensions"]["_schema_error"])[:120]})
+    n_bad = len(bad)
+    # one supported schema version per release: a record of another version (or none) is a failed migration
+    other_versions = {v: n for v, n in versions.items() if v != SCHEMA_VERSION}
+    ok = n_bad == 0 and not other_versions
+    return _gate("schema", ok, records_checked=checked, invalid=n_bad, unmigrated=n_unmigrated, examples=bad, schema_versions=versions, expected_schema_version=SCHEMA_VERSION, other_schema_versions=other_versions)
 
 
 def reference_gate(records: dict[str, list[dict[str, Any]]], max_examples: int = 20) -> dict[str, Any]:
@@ -417,6 +433,140 @@ def accepted_means_verified_gate(records: dict[str, list[dict[str, Any]]], max_e
     return _gate("accepted_means_verified", n_bad == 0, accepted=n_acc, unverified_accepted=n_bad, examples=bad)
 
 
+def checksums_gate(final_dir: Path) -> dict[str, Any]:
+    """``checksums.sha256`` exists and every listed dataset file still hashes to it. Files the
+    release tooling writes *after* the inventory (this report, media_report.json, uploads.json,
+    the review queue) are expected to be unlisted; any other unlisted dataset file is a drift."""
+    from video_dataset.dataset.inventory import CHECKSUMS_FILE, verify_checksums
+
+    p = final_dir / CHECKSUMS_FILE
+    if not p.exists():
+        return _gate("checksums", False, reason="checksums.sha256 missing: run `video-dataset export` (export.inventory) or `video-dataset inventory`")
+    res = verify_checksums(final_dir, p)
+    unlisted = [u for u in res.get("unlisted", []) if u not in _TRANSIENT_FILES and not u.startswith(("frames/", "clips/", "repairs/", "reviews/")) and u != "lineage.jsonl"]
+    ok = bool(res.get("ok")) and not unlisted
+    return _gate("checksums", ok, checked=res.get("checked"), mismatched=res.get("mismatched", [])[:20], missing=res.get("missing", [])[:20], unlisted=unlisted[:20], mismatched_count=len(res.get("mismatched", [])), missing_count=len(res.get("missing", [])))
+
+
+_TRANSIENT_FILES = {REPORT_FILE, "media_report.json", "uploads.json", "review_queue.jsonl", "inventory.json", "checksums.sha256", "review_history.jsonl", "calibration.json", "removed_sources.json", "rights_evidence.jsonl"}
+
+
+def temporal_gate(records: dict[str, list[dict[str, Any]]], max_examples: int = 20) -> dict[str, Any]:
+    """No accepted record has an invalid timestamp (export-time ``temporal_validation``), and
+    every record carries the block (not_run only when the source duration was unknown)."""
+    bad: list[dict[str, Any]] = []
+    n_failed = 0
+    n_missing = 0
+    n_accepted_failed = 0
+    for name, rows in records.items():
+        for r in rows:
+            tv = r.get("temporal_validation")
+            if not isinstance(tv, dict):
+                n_missing += 1
+                continue
+            if tv.get("status") == "failed":
+                n_failed += 1
+                if (r.get("validation") or {}).get("status") == ValidationStatus.ACCEPTED.value:
+                    n_accepted_failed += 1
+                    if len(bad) < max_examples:
+                        bad.append({"type": name, "record_id": r.get("record_id"), "checks": tv.get("checks"), "error_seconds": tv.get("boundary_error_seconds")})
+    return _gate("timestamps", n_accepted_failed == 0 and n_missing == 0, failed=n_failed, accepted_with_failed_timestamps=n_accepted_failed, without_temporal_validation=n_missing, examples=bad)
+
+
+def rights_gate(config: PipelineConfig, records: dict[str, list[dict[str, Any]]], manifests: list[dict[str, Any]], final_dir: Path, media_shipped: bool) -> dict[str, Any]:
+    """Every record carries a ``rights`` block; when media is shipped (``include_media`` /
+    ``package --include-media``), every frame / clip of the release belongs to a source whose
+    rights status is in ``licensing.release_rights`` (or the media files are not under final/)."""
+    release_rights = {str(x) for x in (config.licensing.release_rights or [])}
+    without_block = sum(1 for rows in records.values() for r in rows if not isinstance(r.get("rights"), dict))
+    by_status: dict[str, int] = {}
+    for m in manifests:
+        st = str(m.get("rights_status") or "unknown")
+        by_status[st] = by_status.get(st, 0) + 1
+    violations: list[dict[str, Any]] = []
+    if media_shipped:
+        shipped_videos = {p.name for sub in ("frames", "clips") if (final_dir / sub).is_dir() for p in (final_dir / sub).iterdir() if p.is_dir()}
+        rights_by_video = {str(m.get("video_id")): str(m.get("rights_status") or "unknown") for m in manifests}
+        for vid in sorted(shipped_videos):
+            if rights_by_video.get(vid, "unknown") not in release_rights:
+                violations.append({"video_id": vid, "rights_status": rights_by_video.get(vid, "unknown")})
+    enforced = bool(getattr(config.licensing, "media_rights_gate", True))
+    ok = without_block == 0 and (not violations or not enforced)
+    return _gate("rights", ok, release_rights=sorted(release_rights), videos_by_rights_status=by_status, records_without_rights_block=without_block, media_shipped=media_shipped, media_rights_violations=violations[:20], enforced=enforced)
+
+
+def reproducibility_gate(final_dir: Path) -> dict[str, Any]:
+    """manifest.json records the exact pipeline commit, schema and policy versions and a release id,
+    and they agree with the code that runs this check."""
+    p = final_dir / "manifest.json"
+    if not p.exists():
+        return _gate("reproducibility", False, reason="manifest.json missing")
+    try:
+        m = read_json(p)
+    except (ValueError, AttributeError):
+        return _gate("reproducibility", False, reason="manifest.json unreadable")
+    env = m.get("environment") or {}
+    code = env.get("code") or {}
+    problems: list[str] = []
+    if not m.get("release_id"):
+        problems.append("release_id missing")
+    if not code.get("git_commit"):
+        problems.append("git commit missing")
+    if m.get("schema_version") != SCHEMA_VERSION:
+        problems.append(f"manifest schema_version {m.get('schema_version')} != {SCHEMA_VERSION}")
+    if m.get("policy_version") != POLICY_VERSION:
+        problems.append(f"manifest policy_version {m.get('policy_version')} != {POLICY_VERSION}")
+    if not env.get("models"):
+        problems.append("model identifiers missing")
+    return _gate("reproducibility", not problems, problems=problems, release_id=m.get("release_id"), git_commit=code.get("git_commit"), git_dirty=code.get("git_dirty"), schema_version=m.get("schema_version"), policy_version=m.get("policy_version"))
+
+
+def human_verification_block(final_dir: Path) -> dict[str, Any]:
+    """What the human review protocol produced so far (reported, not gated): sample size,
+    labelled rows, agreement and unresolved disagreements, from reviews/sample.jsonl and labels."""
+    try:
+        from video_dataset.dataset.human_review import (
+            LABELS_FILE,
+            SAMPLE_FILE,
+            read_labelled,
+            read_sample,
+            verification_report,
+        )
+    except Exception:  # pragma: no cover
+        return {"status": "unavailable"}
+    sample_path, labels_path = final_dir / SAMPLE_FILE, final_dir / LABELS_FILE
+    if not sample_path.exists() and not labels_path.exists():
+        return {"status": "not_run", "note": "no stratified sample drawn yet: run `video-dataset review-sample`"}
+    sample = read_sample(sample_path) if sample_path.exists() else []
+    labelled = read_labelled(labels_path) if labels_path.exists() else []
+    if sample_path.exists():
+        labelled += read_labelled(sample_path)
+    rep = verification_report(sample, labelled)
+    rep["status"] = "labelled" if labelled else "sampled"
+    return rep
+
+
+def exclusions_block(records: dict[str, list[dict[str, Any]]], gates: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
+    """Everything a consumer must know was left out, downgraded or kept verbatim: what makes a
+    release ``passed_with_exclusions`` instead of ``passed``."""
+    by_gate = {g["gate"]: g for g in gates}
+    review = {name: sum(1 for r in rows if (r.get("validation") or {}).get("status") == ValidationStatus.REVIEW.value) for name, rows in records.items() if rows}
+    out = {
+        "policy_downgraded": sum(1 for rows in records.values() for r in rows if (r.get("validation") or {}).get("reevaluated")),
+        "review_records_excluded_from_strict": sum(review.values()),
+        "review_by_type": review,
+        "missing_media_assets": by_gate.get("media_references", {}).get("missing", 0),
+        "schema_unmigrated": by_gate.get("schema", {}).get("unmigrated", 0),
+        "removed_sources": len(manifest.get("removed_sources") or []),
+        "dropped_rights_records": ((manifest.get("curation") or {}).get("dropped_rights_records") if isinstance(manifest.get("curation"), dict) else None),
+        "camera_ambiguous": sum(1 for name in ("scenes", "clips") for r in records.get(name, []) if (r.get("camera") or {}).get("movement_ambiguous")),
+        "residual_boundary_failures": [r.get("record_id") for r in records.get("clips", []) if str(r.get("boundary_check")) == "failed"][:50],
+        "residual_boundary_failure_count": sum(1 for r in records.get("clips", []) if str(r.get("boundary_check")) == "failed"),
+    }
+    out["any"] = any(bool(v) for k, v in out.items() if k not in ("review_by_type", "residual_boundary_failures"))
+    return out
+
+
 def _dist(values: Any) -> dict[str, int]:
     out: dict[str, int] = {}
     for v in values:
@@ -442,6 +592,17 @@ def release_metrics(records: dict[str, list[dict[str, Any]]], manifests: list[di
         for c in r.get("claims") or []:
             claims[str(c.get("status"))] = claims.get(str(c.get("status")), 0) + 1
     verification = {name: {dim: _dist(((r.get("validation") or {}).get("verification") or {}).get(dim) for r in rows) for dim in ("temporal", "measurement", "semantic", "human")} for name, rows in records.items() if rows}
+    # structural (heuristic / template / measured) versus independent (verifier / human) semantic verification, apart
+    semantic_split = {}
+    for name, rows in records.items():
+        if not rows:
+            continue
+        sem = [str((r.get("validation") or {}).get("semantic_verification") or "not_run") for r in rows]
+        semantic_split[name] = {
+            "heuristic": sum(1 for s in sem if s in ("measured", "template")),
+            "independent": sum(1 for s in sem if s == "human" or s.startswith("verifier:")),
+            "not_run": sum(1 for s in sem if s == "not_run"),
+        }
     quality_missing: dict[str, dict[str, Any]] = {}
     for name, rows in records.items():
         if not rows:
@@ -455,6 +616,8 @@ def release_metrics(records: dict[str, list[dict[str, Any]]], manifests: list[di
         "status_by_type": statuses,
         "status_pct_by_type": status_pct,
         "verification_by_type": verification,
+        "semantic_verification_split": semantic_split,
+        "grounding_methods": {name: _dist((r.get("quality") or {}).get("grounding_method") for r in rows) for name, rows in records.items() if rows},
         "quality_missing_by_type": quality_missing,
         "policy_downgraded": {name: sum(1 for r in rows if (r.get("validation") or {}).get("reevaluated")) for name, rows in records.items() if rows},
         "reason_codes_by_type": reasons,
@@ -502,35 +665,61 @@ def run_release_check(config: PipelineConfig, final_dir: Path | None = None, *, 
         except (ValueError, AttributeError):
             manifests = []
     media_required = bool(config.upload.include_media) if require_media is None else bool(require_media)
+    manifest_data: dict[str, Any] = {}
+    if manifest.exists():
+        try:
+            manifest_data = read_json(manifest)
+        except (ValueError, AttributeError):
+            manifest_data = {}
+    media_shipped = media_required or (final / "frames").is_dir() or (final / "clips").is_dir()
     gates = [
         schema_gate(records),
         reference_gate(records),
         parquet_gate(final, records),
         counts_gate(final, records),
+        checksums_gate(final),
         split_gate(final, records),
         required_splits_gate(config, records),
         source_pool_gate(config, records, manifests, already_released),
         media_gate(records, config.data_dir, final, media_required),
+        temporal_gate(records),
+        rights_gate(config, records, manifests, final, media_shipped),
         strict_gate(records),
         portable_paths_gate(final, records),
         accepted_means_verified_gate(records),
+        reproducibility_gate(final),
     ]
     failed = [g["gate"] for g in gates if g["state"] == "failed"]
+    exclusions = exclusions_block(records, gates, manifest_data)
+    status = "blocked" if failed else ("passed_with_exclusions" if exclusions["any"] else "passed")
+    repairs_summary: dict[str, Any] | None = None
+    rp = final / "repairs" / "summary.json"
+    if rp.exists():
+        try:
+            repairs_summary = read_json(rp)
+        except (ValueError, AttributeError):
+            repairs_summary = None
     report = {
         "final_dir": final.name,  # the report is published with the data: no machine path
+        "release_id": manifest_data.get("release_id"),
+        "source_revision": manifest_data.get("source_revision"),
+        "status": status,  # passed | passed_with_exclusions | blocked (issue doc section 7)
         "ok": not failed,
         "failed_gates": failed,
         "gates": gates,
+        "exclusions": exclusions,
+        "human_verification": human_verification_block(final),
+        "repair_queues": (repairs_summary or {}).get("counts") if repairs_summary else None,
         "metrics": release_metrics(records, manifests),
     }
     if write_report:
         write_json_atomic(final / REPORT_FILE, report)
-    log.info("release check of %s: %s%s", final, "PASSED" if not failed else "FAILED", f" ({', '.join(failed)})" if failed else "")
+    log.info("release check of %s: %s%s", final, status.upper(), f" ({', '.join(failed)})" if failed else "")
     return report
 
 
 def format_report(report: dict[str, Any]) -> str:
-    lines = [f"release check: {'PASSED' if report['ok'] else 'FAILED'}  ({report['final_dir']})"]
+    lines = [f"release check: {str(report.get('status') or ('PASSED' if report['ok'] else 'FAILED')).upper()}  ({report['final_dir']}, release {report.get('release_id') or 'n/a'})"]
     for g in report["gates"]:
         extra = {k: v for k, v in g.items() if k not in ("gate", "state", "examples", "leaking", "mismatches") and not isinstance(v, (dict, list))}
         if g["state"] == "failed" and isinstance(g.get("mismatches"), dict) and g["mismatches"]:
@@ -541,4 +730,11 @@ def format_report(report: dict[str, Any]) -> str:
     m = report.get("metrics") or {}
     lines.append(f"records: {json.dumps(m.get('records'))}")
     lines.append(f"strict subset: {json.dumps({k: v.get('strict', 0) for k, v in (m.get('subsets') or {}).items()})}")
+    ex = report.get("exclusions") or {}
+    if ex.get("any"):
+        lines.append("exclusions: " + ", ".join(f"{k}={v}" for k, v in ex.items() if k not in ("any", "review_by_type", "residual_boundary_failures") and v))
+    hv = report.get("human_verification") or {}
+    if hv.get("status") not in (None, "not_run", "unavailable"):
+        ag = hv.get("agreement") or {}
+        lines.append(f"human verification: {hv.get('status')} sample={hv.get('sample_size')} labelled={hv.get('labelled')} agreement={ag.get('percent_agreement')} kappa={ag.get('kappa_binary')} unresolved={hv.get('unresolved_disagreements')}")
     return "\n".join(lines)

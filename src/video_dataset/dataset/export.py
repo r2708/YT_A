@@ -73,10 +73,29 @@ def iter_combined(records: dict[str, list[Any]]):  # type: ignore[no-untyped-def
             yield {"record_type": kind, **d}
 
 
-def upgrade_record(kind: str, rec: dict[str, Any] | BaseModel) -> dict[str, Any]:
-    """Bring a record (possibly written by an earlier version) to the current schema: renamed
-    fields are mapped, new fields get their defaults, QA gets record_id / record_type. Records that
-    do not validate are returned unchanged so a rebuild never loses data."""
+class UpgradeStats:
+    """What ``upgrade_records`` did: migration steps applied, unknown fields preserved in
+    ``extensions``, records that still do not validate (kept verbatim, listed for the repair queue)."""
+
+    def __init__(self) -> None:
+        self.steps: dict[str, int] = {}
+        self.extensions: dict[str, int] = {}
+        self.failed: list[dict[str, Any]] = []
+        self.newer: int = 0
+        self.records: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"records": self.records, "steps": dict(self.steps), "fields_moved_to_extensions": dict(self.extensions), "failed": len(self.failed), "failed_examples": self.failed[:20], "newer_than_code": self.newer}
+
+
+def upgrade_record(kind: str, rec: dict[str, Any] | BaseModel, stats: UpgradeStats | None = None) -> dict[str, Any]:
+    """Bring a record (possibly written by an earlier version) to the current schema: the
+    versioned migrations run first (``schemas.migrations``), unknown fields move to
+    ``extensions``, then the pydantic model fills the defaults. A record that still does not
+    validate is returned unchanged (with ``extensions["_schema_error"]``) so a rebuild never loses
+    data; the release gate reports it."""
+    from video_dataset.schemas.migrations import known_fields, migrate_record, move_unknown_to_extensions
+
     if isinstance(rec, BaseModel):
         d = rec.model_dump(mode="json")
     else:
@@ -85,17 +104,37 @@ def upgrade_record(kind: str, rec: dict[str, Any] | BaseModel) -> dict[str, Any]
     if model is None:
         return d
     d.pop("record_type", None)
+    if stats is not None:
+        stats.records += 1
+    d, steps = migrate_record(kind, d)
+    if stats is not None:
+        for s in steps:
+            if s.startswith("newer:"):
+                stats.newer += 1
+            else:
+                stats.steps[s] = stats.steps.get(s, 0) + 1
+    moved = move_unknown_to_extensions(d, _KNOWN_FIELDS.setdefault(kind, known_fields(model)))
+    if stats is not None:
+        for k in moved:
+            stats.extensions[k] = stats.extensions.get(k, 0) + 1
     try:
         out = model.model_validate(d).model_dump(mode="json")
-    except Exception as exc:  # pragma: no cover - depends on legacy data
-        log.warning("record %s of type %s does not match the current schema (%s); kept as is", d.get("record_id") or d.get("question_id"), kind, str(exc)[:160])
+    except Exception as exc:  # depends on legacy data
+        rid = d.get("record_id") or d.get("question_id")
+        log.warning("record %s of type %s does not match the current schema (%s); kept as is", rid, kind, str(exc)[:160])
         out = d
+        out.setdefault("extensions", {})["_schema_error"] = str(exc)[:300]
+        if stats is not None:
+            stats.failed.append({"type": kind, "record_id": rid, "error": str(exc)[:200]})
     out["record_type"] = RECORD_TYPES.get(kind, kind)
     return out
 
 
-def upgrade_records(records: dict[str, list[Any]]) -> dict[str, list[dict[str, Any]]]:
-    return {kind: [upgrade_record(kind, r) for r in rows] for kind, rows in records.items()}
+_KNOWN_FIELDS: dict[str, set[str]] = {}
+
+
+def upgrade_records(records: dict[str, list[Any]], stats: UpgradeStats | None = None) -> dict[str, list[dict[str, Any]]]:
+    return {kind: [upgrade_record(kind, r, stats) for r in rows] for kind, rows in records.items()}
 
 
 def write_typed_parquet_files(records: dict[str, list[Any]], out_dir: Path) -> dict[str, int]:

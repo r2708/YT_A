@@ -271,7 +271,7 @@ def run(
 def resume(
     workers: Annotated[int | None, typer.Option("--workers", "-w", help="Parallel videos for CPU stages")] = None,
     until: Annotated[str | None, typer.Option("--until", help="Stop after this stage")] = None,
-    include_rejected: Annotated[bool, typer.Option("--include-rejected", help="Also retry videos rejected by URL/duration/size limits")] = False,
+    include_rejected: Annotated[bool, typer.Option("--include-rejected", help="Also retry videos rejected by URL/duration/size limits or recorded as unavailable (removed/private)")] = False,
     no_aggregate: Annotated[bool, typer.Option("--no-aggregate", help="Skip merging per-video exports into final/")] = False,
     config: ConfigOpt = None,
     set_: SetOpt = None,
@@ -734,6 +734,7 @@ def calibrate(
     labels: Annotated[str | None, typer.Argument(help="CSV/JSONL with record_id + correct (default: final/reviews/labels.jsonl)")] = None,
     final_dir: Annotated[str | None, typer.Option("--final-dir", help="Dataset directory (default: data/final)")] = None,
     target_far: Annotated[float, typer.Option("--target-false-accept", help="False-accept rate the recommended thresholds must meet")] = 0.05,
+    camera_labels: Annotated[str | None, typer.Option("--camera-labels", help="CSV/JSONL with record_id + camera_movement (human) -> confusion matrix vs the measured family; the review sample file works too")] = None,
     config: ConfigOpt = None,
     set_: SetOpt = None,
 ) -> None:
@@ -755,7 +756,15 @@ def calibrate(
     if not lab:
         console.print("no labels found; fill final/review_queue.jsonl (`review-queue`) and save it as final/reviews/labels.jsonl, or pass a CSV with record_id,correct")
         raise typer.Exit(1)
-    report = _calibrate(load_final(final), lab, float(cfg.validation.minimum_confidence), float(target_far))
+    records = load_final(final)
+    report = _calibrate(records, lab, float(cfg.validation.minimum_confidence), float(target_far))
+    report["version"] = "calibration-2026.11"
+    if camera_labels:
+        from video_dataset.dataset.camera_eval import confusion_matrix, format_confusion, read_camera_labels
+
+        cm = confusion_matrix(records, read_camera_labels(Path(camera_labels)))
+        report["camera_confusion"] = cm
+        console.print(format_confusion(cm))
     out = write_calibration(report, final / "calibration.json")
     t = Table(title=f"calibration on {report['matched_records']} labelled records")
     for col in ("source | type", "n", "accuracy", "brier", "ECE", "FAR@thr", "FRR@thr", "recommended thr"):
@@ -967,6 +976,13 @@ def clean(
         console.print(f"removed {removed} path(s), freed {freed / 1e9:.2f} GB" + (f"; forgot {len(forget)} video(s)" if forget else ""))
     finally:
         runner.close()
+
+
+# release-remediation commands: inventory / verify-checksums / compare-releases / repair-queues / lineage /
+# review-sample / review-agreement / export-tasks / benchmark (src/video_dataset/cli_remediation.py)
+from video_dataset.cli_remediation import register as _register_remediation  # noqa: E402
+
+_register_remediation(app, _config, _apply_local_options)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -25,6 +25,12 @@ class TranscriptSegment(BaseSchema):
     no_speech_prob: float | None = None
     words: list[Word] = Field(default_factory=list)
     scene_ids: list[str] = Field(default_factory=list)
+    speaker_id: str | None = None  # None until a diarization step assigns one (never guessed)
+    # mean word probability over the segment's words (None without word timestamps): how well the
+    # words were aligned, separate from ``confidence`` (the ASR log-probability of the text)
+    alignment_confidence: float | None = Field(default=None, ge=0, le=1)
+    # within_audio | clamped (end trimmed to the audio duration) | outside_audio | not_checked
+    alignment_status: str = "not_checked"
 
 
 class Transcript(BaseSchema):
@@ -39,6 +45,9 @@ class Transcript(BaseSchema):
     # failed: the ASR stage crashed. Lets consumers tell "no speech" from "nobody listened".
     status: str = "transcribed"
     segments: list[TranscriptSegment] = Field(default_factory=list)
+    diarization: str = "not_run"  # not_run | <method>: whether speaker ids were assigned
+    audio_duration: float | None = None  # duration the segments were validated against
+    alignment_tolerance_seconds: float | None = None  # tolerance used by ``validate_alignment``
 
     def text_between(self, start: float, end: float) -> str:
         parts = [s.text.strip() for s in self.segments if s.end > start and s.start < end]

@@ -15,12 +15,16 @@ download:
   max_resolution: 1080
   format: mp4
   cookies_file: null       # only for videos you are authorized to access (exported Netscape cookies.txt)
-  cookies_from_browser: null  # e.g. chrome, "chrome:Profile 1", firefox, edge - read cookies straight from the browser
+  cookies_from_browser: brave # e.g. brave, chrome, "chrome:Profile 1", firefox, edge - read cookies straight from the
+                           # browser. Must be a browser that is LOGGED IN to YouTube; without one YouTube answers
+                           # "Sign in to confirm you're not a bot" for every video. On this Mac Chrome's YouTube
+                           # cookies are rotated (dead) and Firefox is not signed in; Brave works (2026-10-29).
   cookies_optional: true   # true: if cookies cannot be loaded (Chrome locked / DPAPI on Windows, missing file)
                            # log a warning and download without them; false: fail the video instead
   rate_limit: null         # e.g. "4M"
   retries: 3
-  concurrency: 2
+  concurrency: 2           # simultaneous yt-dlp sessions process-wide, whatever pipeline.workers is; more than
+                           # ~3 parallel requests from one IP triggers YouTube's bot check
   skip_existing: true
   socket_timeout: 30
   extra_args: {}           # passed straight to yt-dlp options
@@ -102,6 +106,7 @@ transcription:
   min_segment_confidence: 0.0
   initial_prompt: null     # bias the decoder, e.g. a Devanagari sentence to keep Hindi output in Devanagari script
   device: null
+  alignment_tolerance_seconds: 0.25  # segment ends past the audio by <= this are clamped; further -> alignment_status outside_audio
 
 audio_events:
   enabled: true
@@ -265,6 +270,7 @@ licensing:
   code_license: MIT        # published in manifest.json["licenses"] + the dataset card: what each licence covers
   annotation_license: MIT  # the pipeline's own annotations / metadata; source videos keep their own licence (provenance.jsonl)
   media_policy: "per-video: only sources with rights_status in release_rights may be redistributed; everything else is metadata-only"
+  media_rights_gate: true  # enforce it: shipped frames/clips are limited to release_rights videos; release gate `rights` checks it
 
 deduplication:
   enabled: true
@@ -297,6 +303,7 @@ export:
     min_validation_videos: 1  # eval splits are topped up with the lowest-hash groups to these minimums
     min_test_videos: 1        # (train always keeps >= 1 group); 0 = fractions only
     required_splits: [train, validation, test]  # release-check fails when one of these is empty / below its minimum
+    group_by_channel: true    # every video of one channel (+ its near-duplicates) shares one split: no creator straddles train/test
   tiers:                   # gold / silver / bronze from measured signals only
     enabled: true
     gold_min_overall: 0.8
@@ -336,6 +343,11 @@ export:
   enforce_policy: true     # accepted records whose required checks did not all pass (boundary not_run, no check states,
                            # validated before the policy existed) are re-labelled review at export; human accepts stay
   min_source_videos: 50    # release-check fails below this many source videos (0 disables)
+  inventory: true          # inventory.json + checksums.sha256 of every exported file (release-check verifies them)
+  task_exports: true       # final/exports/<task>/ : understanding | temporal_reasoning | cinematic | generation_ready (+ filters.json, README)
+  benchmark: true          # final/benchmark/ : held-out human-verified evaluation items (empty + note until labels exist)
+  lineage: true            # append every status change (policy downgrade, human label) to final/lineage.jsonl
+  review_history: true     # append the review rate per record type to final/review_history.jsonl at every export
 
 upload:
   provider: huggingface    # none | huggingface - upload final/ automatically once it reaches threshold_mb
@@ -351,6 +363,7 @@ upload:
   retries: 3
   release_gate: true       # run the release gates (schema, JSONL==Parquet ids, split leakage, media when
                            # include_media) before every upload; a failing gate aborts the upload
+  verify_checksums: true   # after the upload compare the Hub's LFS sha256 of every file with checksums.sha256
 
 cleanup:
   after_export: all      # none | media | all - what to delete automatically once a video's EXPORT is DONE

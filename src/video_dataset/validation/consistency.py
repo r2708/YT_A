@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import re
 
-from video_dataset.schemas.vision import MOVEMENT_TAXONOMY, CameraMovement, CameraMovementFamily, SceneAnalysis
+from video_dataset.schemas.vision import (
+    MOVEMENT_TAXONOMY,
+    CameraMovement,
+    CameraMovementFamily,
+    SceneAnalysis,
+)
 from video_dataset.vision.subject_motion import TRACKING_SET
 
 # words in free text that commit to a camera movement family (+ direction)
@@ -113,7 +118,7 @@ def check_scene_consistency(a: SceneAnalysis) -> tuple[list[str], list[str]]:
     if claimed and cam.movement != CameraMovement.UNKNOWN:
         for lab in claimed:
             lab_family, lab_dir = _family(lab)
-            if lab == cam.movement or lab_family == family and (lab_dir is None or direction is None):
+            if lab == cam.movement or (lab_family == family and (lab_dir is None or direction is None)):
                 continue
             if lab_family == family and lab_dir and direction and lab_dir == _OPPOSITE_DIRECTION.get(direction):
                 hard.append(f"caption says '{lab}' but the camera field is {cam.movement}")

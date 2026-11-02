@@ -120,21 +120,47 @@ def _family(label) -> CameraMovementFamily:  # type: ignore[no-untyped-def]
         return CameraMovementFamily.UNKNOWN
 
 
-def camera_motion_agreement(a) -> tuple[str, str | None]:  # type: ignore[no-untyped-def]
-    """Explicit check: the camera label vs the measured optical-flow label. ``not_applicable`` when
-    either side is unknown (nothing to compare), ``failed`` when the families disagree with a
-    consistent measurement (zoom vs dolly and tracking vs pan are compatible refinements)."""
+AMBIGUOUS_PAIRS = ({CameraMovementFamily.ZOOM, CameraMovementFamily.DOLLY}, {CameraMovementFamily.TRACKING, CameraMovementFamily.PAN}, {CameraMovementFamily.TRACKING, CameraMovementFamily.TILT})
+
+
+def _mark_ambiguous(a, alternatives: list[str], why: str) -> None:  # type: ignore[no-untyped-def]
+    """Record on the camera annotation that the label has a look-alike the measurement cannot
+    exclude. The label stays (it is the best reading) but the record goes to review and is never
+    counted as verified camera motion (``camera_eval`` / cinematic task policy)."""
+    alts = [x for x in dict.fromkeys(alternatives) if x and x != str(a.camera.movement)]
+    a.camera = a.camera.model_copy(update={"movement_ambiguous": True, "movement_alternatives": alts})
+    a.enrichments["camera_ambiguity"] = why
+
+
+def camera_motion_agreement(a, min_consistency: float = 0.6) -> tuple[str, str | None]:  # type: ignore[no-untyped-def]
+    """Explicit check: the camera label vs the measured optical-flow label.
+
+    * ``not_applicable`` when either side is unknown (nothing to compare);
+    * ``passed`` when the families agree and the flow is consistent;
+    * ``failed`` (-> review) when the families disagree, when the label is a refinement the flow
+      cannot distinguish from a look-alike (zoom vs dolly, tracking vs pan / tilt) or when the flow
+      is too inconsistent to support the label. In the ambiguous cases the camera annotation is
+      marked ``movement_ambiguous`` with the alternative readings, so "uncertain labels remain
+      review" instead of passing as verified (issue P1-09).
+    """
     m = a.measurements
     label = a.camera.movement
     if m is None or not m.camera_motion_label or label == CameraMovement.UNKNOWN:
         return NOT_APPLICABLE, None
     fam, flow_fam = _family(label), _family(m.camera_motion_label)
+    consistency = float(m.camera_motion_consistency or 0.0)
     if fam == flow_fam:
+        if consistency < min_consistency and fam not in (CameraMovementFamily.STATIC,):
+            _mark_ambiguous(a, [str(m.camera_motion_label)], f"flow consistency {consistency:.2f} below {min_consistency:.2f}")
+            return CheckState.FAILED.value, f"camera label {label} agrees with the flow but only {consistency:.2f} of samples support it"
         return CheckState.PASSED.value, None
-    compatible = {fam, flow_fam} <= {CameraMovementFamily.ZOOM, CameraMovementFamily.DOLLY} or (fam == CameraMovementFamily.TRACKING and flow_fam in (CameraMovementFamily.PAN, CameraMovementFamily.TILT, CameraMovementFamily.HANDHELD, CameraMovementFamily.COMPLEX))
-    if compatible or flow_fam in (CameraMovementFamily.UNKNOWN, CameraMovementFamily.COMPLEX, CameraMovementFamily.HANDHELD) or (m.camera_motion_consistency or 0.0) < 0.6:
-        return CheckState.PASSED.value, None
-    return CheckState.FAILED.value, f"camera label {label} vs measured {m.camera_motion_label} ({m.camera_motion_consistency:.2f} consistent)"
+    if any({fam, flow_fam} <= pair for pair in AMBIGUOUS_PAIRS):
+        _mark_ambiguous(a, [str(m.camera_motion_label)], f"{fam.value} vs {flow_fam.value}: optical flow cannot separate them")
+        return CheckState.FAILED.value, f"camera label {label} is ambiguous with measured {m.camera_motion_label} (needs review)"
+    if flow_fam in (CameraMovementFamily.UNKNOWN, CameraMovementFamily.COMPLEX, CameraMovementFamily.HANDHELD) or consistency < min_consistency:
+        _mark_ambiguous(a, [str(m.camera_motion_label)], f"inconclusive flow ({flow_fam.value}, {consistency:.2f} consistent)")
+        return CheckState.FAILED.value, f"camera label {label} not supported by the flow measurement ({m.camera_motion_label}, {consistency:.2f} consistent)"
+    return CheckState.FAILED.value, f"camera label {label} vs measured {m.camera_motion_label} ({consistency:.2f} consistent)"
 
 
 def _text_checker(ctx: VideoContext) -> TextChecker:
@@ -214,7 +240,9 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
             issues.append("analyzer errors: " + "; ".join(a.errors)[:200])
         quality = scene_quality(a)
         generative = a.provider not in MEASURED_PROVIDERS
-        semantic = "measured"
+        # measured: the text is a measurement; template: a fixed template phrased measured / detected
+        # fields (no free generation, but the phrasing was not checked against the pixels either)
+        semantic = "template" if a.summary else "measured"
         if generative:
             suggested = confidence_status(a.confidence, vcfg.minimum_confidence, vcfg.review_confidence)
             if a.verification is not None and a.verification.verdict != VerificationVerdict.UNKNOWN:
@@ -299,7 +327,7 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
             issues.extend("inconsistency: " + x for x in c_soft)
         else:
             checks["consistent"] = NOT_RUN
-        state, detail = camera_motion_agreement(a)
+        state, detail = camera_motion_agreement(a, float(cfg.temporal.min_camera_consistency or 0.6))
         checks["camera_motion_agreement"] = state
         if detail:
             issues.append("camera motion disagreement: " + detail)
@@ -541,6 +569,17 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         checks["has_evidence"] = bool(ev.event_ids or ev.scene_ids)
         if not checks["has_evidence"]:
             hard.append("question has no evidence")
+        # the evidence window must contain every referenced event's interval (P1-06); recomputed at export too
+        known_ev = [event_by_id[x] for x in ev.event_ids if x in event_by_id]
+        if not ev.event_ids:
+            checks["evidence_covers_events"] = NOT_APPLICABLE
+        elif len(known_ev) != len(ev.event_ids):
+            checks["evidence_covers_events"] = False
+        else:
+            outside = [e.event_id for e in known_ev if e.start_time < ev.start_time - 0.05 or e.end_time > ev.end_time + 0.05]
+            checks["evidence_covers_events"] = not outside
+            if outside:
+                issues.append("evidence window does not cover its events: " + ", ".join(outside[:3]))
         rejected_ev = [x for x in ev.event_ids if event_status.get(x) == ValidationStatus.REJECTED]
         if rejected_ev:
             hard.append("evidence event rejected: " + ", ".join(rejected_ev[:3]))
@@ -553,11 +592,13 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         if ocr:
             texts += [t.text for t in ocr.tracks if t.first_seen <= ev.end_time and t.last_seen >= ev.start_time]
         grounding = answer_grounding_score(q_rec.answer, texts, (ev.start_time, ev.end_time))
+        grounding_method = "lexical_overlap_v1"
         if q_rec.type in (QAType.DURATION, QAType.EVENT_LOCALIZATION):
             # these answers are numbers derived from the evidence window; judge the numbers, and require
             # that the question itself names the evidence
             q_lex = answer_grounding_score(q_rec.question, texts, None)
             grounding = round(0.7 * numeric_grounding_score(q_rec.answer, (ev.start_time, ev.end_time), duration) + 0.3 * q_lex, 3)
+            grounding_method = "numeric_window_v1"
         checks["answer_grounded"] = grounding >= vcfg.grounding_min_overlap
         if not checks["answer_grounded"]:
             hard.append(f"answer not supported by evidence (grounding {grounding:.2f})")
@@ -593,9 +634,11 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         elif q_rec.confidence < vcfg.minimum_confidence:
             issues.append("low confidence evidence")
         qualities = [event_quality_by_id[x] for x in ev.event_ids if x in event_quality_by_id]
-        q_rec.quality = qa_quality(q_rec, grounding, qualities)
+        q_rec.quality = qa_quality(q_rec, grounding, qualities, grounding_method)
         semantic_states = {ve.validation.semantic_verification for ve in v_events if ve.event.event_id in ev.event_ids}
-        semantic = NOT_RUN if NOT_RUN in semantic_states else "measured"
+        # a question is phrased by a template from its evidence events: it is as verified as they are,
+        # and a template is never an independent semantic check
+        semantic = NOT_RUN if NOT_RUN in semantic_states else ("human" if semantic_states and semantic_states <= {"human"} else "template")
         status, reasons = decide("qa", checks, hard, suggested, issues, semantic)
         q_rec.validation = ValidationInfo(status=status, issues=hard + issues, checks=checks, reason_codes=reasons, policy_version=POLICY_VERSION, semantic_verification=semantic)
     if cfg.deduplication.enabled:

@@ -92,6 +92,43 @@ def test_resume_skips_rejected_unless_asked(tmp_path: Path, test_config):
         runner.close()
 
 
+@pytest.mark.parametrize(
+    "err",
+    [
+        "DownloadUnavailable: unavailable: ERROR: [youtube] zhh2AnnSZ3s: Video unavailable. This video has been removed by the uploader",
+        # record written before DownloadUnavailable existed (state.db from older runs)
+        "DownloadFailed: unavailable: ERROR: [youtube] zpaVoNW7WaQ: Video unavailable. This video is private",
+    ],
+)
+def test_resume_skips_unavailable_unless_asked(tmp_path: Path, test_config, err: str):
+    """A removed/private/terminated source cannot come back by re-running: resume must not re-queue it."""
+    cfg = test_config.model_copy(deep=True)
+    runner = PipelineRunner(cfg)
+    try:
+        item = classify_input("https://www.youtube.com/watch?v=zhh2AnnSZ3s")
+        assert item is not None
+        (vid, _), = runner.register_inputs([item])
+        runner.db.start_stage(vid, Stage.DOWNLOAD)
+        runner.db.fail_stage(vid, Stage.DOWNLOAD, err)
+        assert runner.unfinished_videos() == []
+        pending = runner.unfinished_videos(include_rejected=True)
+        assert len(pending) == 1 and pending[0][0] == vid
+        assert runner.resume() == []
+    finally:
+        runner.close()
+
+
+def test_download_unavailable_is_non_retryable():
+    """The runner must not burn stage_retries on a source that is gone."""
+    from video_dataset.downloader.stage import DownloadFailed, DownloadUnavailable
+    from video_dataset.errors import NonRetryableError
+
+    exc = DownloadUnavailable("unavailable: Video unavailable. This video is private")
+    assert isinstance(exc, NonRetryableError)
+    assert isinstance(exc, DownloadFailed)
+    assert str(exc).startswith("unavailable:")
+
+
 def test_resume_cli_when_nothing_pending(tmp_path: Path):
     from typer.testing import CliRunner
 

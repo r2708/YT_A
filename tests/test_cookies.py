@@ -269,3 +269,22 @@ def test_non_cookie_errors_are_not_masked(tmp_path: Path, monkeypatch):
     assert item is not None
     res = dl.fetch(item, "vid_test", tmp_path / "dl")
     assert res.status.value == "unavailable" and calls["n"] == 1
+
+
+def test_download_gate_is_shared_and_resized():
+    from video_dataset.downloader import youtube as y
+
+    a = y.download_gate(2)
+    assert a is y.download_gate(2)
+    assert a._value == 2
+    b = y.download_gate(3)
+    assert b is not a and b._value == 3
+    assert y.download_gate(0)._value == 1  # never zero
+
+
+def test_is_bot_check_matches_youtube_wall():
+    from video_dataset.downloader.youtube import is_bot_check
+
+    assert is_bot_check("ERROR: [youtube] abc: Sign in to confirm you’re not a bot. Use --cookies-from-browser")
+    assert is_bot_check("Sign in to confirm you're not a bot")
+    assert not is_bot_check("Video unavailable")

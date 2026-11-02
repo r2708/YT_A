@@ -10,7 +10,8 @@ and delete the local copies - one shard at a time, so an 8 GB machine never hold
 
 Per shard, in order:
 
-1. a **child interpreter** downloads the shard (dataset files + per_video, no media), re-annotates
+1. a **child interpreter** downloads the shard (lean: the per-type JSONL + manifests only, no
+   Parquet / per_video / media - ``--full-download`` for everything), re-annotates
    it into ``<work-dir>/rewritten/<shard>`` (current schema, export-time acceptance policy,
    splits with minimums, tiers, strict subset, hard negatives, typed Parquet, licence / tier
    policy blocks), runs the release gates and compares the Parquet schema of every record type
@@ -83,7 +84,7 @@ def _parquet_schemas(shard_dir: Path) -> dict[str, list[tuple[str, str]]]:
 
 
 # ----------------------------------------------------------------------------- child: one shard
-def worker(path_in_repo: str, work: Path, overrides: dict[str, str], rebuild_negatives: bool, source_dir: Path | None = None) -> int:
+def worker(path_in_repo: str, work: Path, overrides: dict[str, str], rebuild_negatives: bool, source_dir: Path | None = None, lean: bool = True) -> int:
     """Download (or take from ``source_dir``) + re-annotate + gate one shard; write
     <work>/status/<shard>.json; exit 0 when pushable."""
     from video_dataset.cli import load_env_file
@@ -107,7 +108,7 @@ def worker(path_in_repo: str, work: Path, overrides: dict[str, str], rebuild_neg
         print(f"== {name}: using {local}", flush=True)
     else:
         print(f"== {name}: downloading", flush=True)
-        local = download_shard(cfg, path_in_repo, work / "hub", token)
+        local = download_shard(cfg, path_in_repo, work / "hub", token, lean=lean)
     out_dir = work / "rewritten" / name
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -139,6 +140,7 @@ def main() -> int:
     ap.add_argument("--no-push", action="store_true", help="download + re-annotate + gate only; keep the local copies, touch nothing on the Hub")
     ap.add_argument("--no-card", action="store_true", help="leave README.md alone")
     ap.add_argument("--no-negatives", action="store_true", help="skip rebuilding hard negatives (faster)")
+    ap.add_argument("--full-download", action="store_true", help="download every shard file (default: only the per-type JSONL + manifests the re-annotation reads, ~4x less)")
     ap.add_argument("--clean-root", action="store_true", help="after the shards: delete stale non-shard files at the repository root")
     ap.add_argument("--delete-media", action="store_true", help="also delete frames/ and clips/ files of a shard that the rewritten shard does not list")
     ap.add_argument("--keep-local", action="store_true", help="do not delete the downloaded / rewritten shard after a successful push")
@@ -158,7 +160,7 @@ def main() -> int:
     cfg = load_config(None, _overrides(args.overrides))
     work = Path(args.work_dir) if args.work_dir else cfg.data_dir / "reannotate"
     if args.worker:
-        return worker(args.worker, work, _overrides(args.overrides), rebuild_negatives=not args.no_negatives, source_dir=Path(args.source_dir) if args.source_dir else None)
+        return worker(args.worker, work, _overrides(args.overrides), rebuild_negatives=not args.no_negatives, source_dir=Path(args.source_dir) if args.source_dir else None, lean=not args.full_download)
 
     import hf_replace_shards as base
 
@@ -207,6 +209,8 @@ def main() -> int:
         cmd = [sys.executable, str(Path(__file__).resolve()), HIDDEN_WORKER, path_in_repo, "--work-dir", str(work)]
         if args.no_negatives:
             cmd.append("--no-negatives")
+        if args.full_download:
+            cmd.append("--full-download")
         if args.source_dir:
             cmd += ["--source-dir", args.source_dir]
         for ov in args.overrides:

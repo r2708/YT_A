@@ -1,5 +1,10 @@
 ---
-license: mit
+license: other
+license_name: mixed-annotations-mit-media-per-source
+license_details: >-
+  Annotations and metadata written by the pipeline are MIT; the pipeline code is MIT. Source videos keep
+  their own licence (provenance.jsonl and the per-record `rights` block: status, allowed_use, redistribution,
+  evidence_url). Nothing here grants rights to the underlying videos, audio, transcripts or on-screen text.
 task_categories:
 - question-answering
 - visual-question-answering
@@ -291,7 +296,22 @@ All records include:
 - **`transcript_segments` / `transcript_scope`** - transcript text clipped to the record's window with absolute and relative times; `coverage` says whether ASR / OCR / audio events / tracking actually ran
 - **Events** - `boundary_precision` with `start_uncertainty_ms` / `end_uncertainty_ms`; relations carry `evidence_kind`
 - **`source_group_id`**, `schema_version`, `annotation_scope`, `generation_target` on every record; the `strict` subset (and `strict/` folder) holds only records whose required checks all passed
-- **`provenance.jsonl`, `media_manifest.jsonl`, `release_report.json`** in every shard - source rights (`rights_status`), referenced-media integrity and the release gates the shard passed
+- **`provenance.jsonl`, `media_manifest.jsonl`, `release_report.json`** in every shard - source rights (`rights_status`, `rights_method`, `allowed_use`, `redistribution`, `evidence_url`), the asset registry (`asset_id`, `media_status`, size, optional sha256, time span, rights) and the release gates the shard passed, with the release `status` (`passed` / `passed_with_exclusions` / `blocked`) and an `exclusions` block
+- **`inventory.json` + `checksums.sha256`** in every shard - every published file with size, SHA-256, format, row count, schema version and record type (`sha256sum -c checksums.sha256` verifies a download; the uploader verifies the Hub's LFS hashes after each push)
+- **`schema_version`** - one version per release (`2.3.0`); older shards are brought forward by versioned, tested migrations (`schemas/migrations.py`); fields no migration knows stay in `extensions`
+- **`quality.grounding_method`** - how `quality.grounding` was obtained (`verifier`, `instrument:<source>`, `lexical_overlap_v1`, `numeric_window_v1`, `derived_min`); `not_assessed` with a null score when no evidence exists - never copied from an unrelated confidence
+- **`temporal_validation`** on every record - export-time range / order / within-duration / inside-parent checks against the source duration; a release is blocked when an accepted record fails them
+- **`validation.semantic_verification`** - `measured` or `template` (heuristic text, no free generation), `verifier:<name>`, `human` (independent), `not_run`; the release report counts heuristic and independent verification separately
+- **`camera.movement_ambiguous` / `movement_alternatives` / `camera_motion_source`** - zoom vs dolly, tracking vs pan and inconsistent-flow labels are marked ambiguous and stay in review; camera motion is measured from optical flow (+ a subject track), never inferred from the subject box alone; `subject_motion.world_motion` keeps the background entity apart (see `docs/camera_motion_taxonomy.md`)
+- **`provenance`** on every record - pipeline version and git commit, provider / model, prompt-template version, policy and quality-scoring versions, export time
+- **`rights`** on every record - status, method (`platform_declared` | `human_evidence`), verification date, allowed use, redistribution, evidence URL
+- **`continuity`** on scene / clip / frame records - previous / next scene, transition in / out, temporal adjacency, sequence id, subject and location continuity
+- **`ocr_detections`** on frame records - each detection with its normalised bbox, timestamp, score, engine and engine version; **`object_tracks`** on scene / clip records (per-shot tracker ids, `uncertain` associations flagged); **`lighting`** / **`color`** blocks on scenes (measured level and appearance apart from the physical setup, container colour space / transfer / range, statistics method; white balance and light setup are never guessed)
+- **`validation.history` + `lineage.jsonl`** - every status change after validation (policy downgrade, human label) with reason, actor, time and policy version
+- **`exports/<task>/`** - task-specific exports (`understanding`, `temporal_reasoning`, `cinematic`, `generation_ready`) with `filters.json` (eligibility policy, counts by status and exclusion reason) and a README; `generation_ready` holds only decodable, rights-cleared media with prompt / target pairs (`pairs.jsonl`)
+- **`benchmark/`** - fixed, held-out (`test` split), human-verified evaluation items per task with versioned metric definitions and guidelines; empty with a note until human labels exist
+- **`reviews/sample.jsonl`** - the stratified human verification sample (record type x tier x failure category, double-annotated share); `reviews/agreement.json` reports percent agreement, Cohen's kappa, camera-label agreement and the boundary audit; `release_report.json["human_verification"]` repeats them
+- **`repairs/<queue>.jsonl`** - repair queues (missing media / frames, invalid timestamps, broken evidence, schema failures, duplicates, ambiguous camera, unverified descriptions, rights-unverified) with a proposed action per record; `compare-releases` diffs two releases before anything is published
 
 Questions are generated from timeline events (not hallucinated), ensuring high-quality, verifiable question-answer pairs.
 

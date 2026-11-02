@@ -149,7 +149,9 @@ def test_camera_motion_agreement_is_an_explicit_check():
     assert camera_motion_agreement(_analysis(movement=CameraMovement.UNKNOWN))[0] == "not_applicable"
     state, detail = camera_motion_agreement(_analysis(movement=CameraMovement.STATIC))
     assert state == "failed" and "pan_left" in (detail or "")
-    assert camera_motion_agreement(_analysis(movement=CameraMovement.TRACKING_LEFT))[0] == "passed"  # tracking refines a pan
+    # tracking vs a measured pan is a look-alike the flow cannot separate: ambiguous -> failed (review), never a silent pass
+    amb = _analysis(movement=CameraMovement.TRACKING_LEFT)
+    assert camera_motion_agreement(amb)[0] == "failed" and amb.camera.movement_ambiguous and amb.camera.movement_alternatives
 
 
 # ------------------------------------------------------------------ issue 6 / 13: text structure
@@ -533,7 +535,7 @@ def test_pipeline_export_passes_release_gates(synthetic_video: Path, test_config
         assert validated["summary"]["policy_version"] == POLICY_VERSION and validated["summary"]["claims"]["supported"] >= 1
         for s in validated["scenes"]:
             v = s["validation"]
-            assert v["policy_version"] == POLICY_VERSION and v["semantic_verification"] == "measured"
+            assert v["policy_version"] == POLICY_VERSION and v["semantic_verification"] in ("measured", "template")  # heuristic text, phrased by a template
             assert check_state(v["checks"]["clip_boundaries"]) in ("passed", "failed", "error") and check_state(v["checks"]["text_consistent"]) == "passed" and check_state(v["checks"]["camera_motion_agreement"]) in ("passed", "not_applicable")
             assert s["analysis"]["enrichments"]["claims"]
         for q in validated["qa"]:

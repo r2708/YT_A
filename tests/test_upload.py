@@ -66,7 +66,7 @@ def _fake_final(cfg, videos: list[str], rows_per_video: int = 3, media: bool = T
     write_jsonl(final / CINEMATIC_DIR / "scenes.jsonl", [])
     (final / CINEMATIC_DIR / "scenes.parquet").write_bytes(b"p" * 50)
     write_json_atomic(final / "statistics.json", {"frames": len(records["frames"])})
-    write_json_atomic(final / "manifest.json", {"videos": [{"video_id": v} for v in videos]})
+    write_json_atomic(final / "manifest.json", {"videos": [{"video_id": v, "rights_status": "declared_cc_by"} for v in videos]})  # media ships only for release-rights sources
 
 
 def _cfg(tmp_path: Path, **over):

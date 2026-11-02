@@ -171,6 +171,12 @@ def derive_camera_fields(d: dict[str, Any]) -> dict[str, Any]:
         d["stabilization"] = d["stability"]
     elif not d.get("stabilization") and movement in (CameraMovement.STATIC, CameraMovement.HANDHELD):
         d["stabilization"] = movement.value
+        d.setdefault("stabilization_evidence", "movement_label")
+    elif not d.get("stabilization") and movement == CameraMovement.DRONE:
+        d["stabilization"] = "drone"
+        d.setdefault("stabilization_evidence", "movement_label")
+    if d.get("stabilization") is not None:
+        d["stabilization"] = normalize_stabilization(d["stabilization"])
     if d.get("is_aerial") is None and (movement == CameraMovement.DRONE or angle == CameraAngle.AERIAL):
         d["is_aerial"] = True
     if d.get("focal_length_mm") is not None:
@@ -178,7 +184,24 @@ def derive_camera_fields(d: dict[str, Any]) -> dict[str, Any]:
             d["focal_length_mm"] = float(d["focal_length_mm"])
         except (TypeError, ValueError):
             d["focal_length_mm"] = None
+        if d["focal_length_mm"] is not None and not d.get("focal_length_source"):
+            # nothing in the pipeline reads focal length from a container or production sheet: a value
+            # without a declared source can only be an appearance estimate
+            d["focal_length_source"] = "model_estimate"
+    if d.get("movement_ambiguous") is None:
+        d["movement_ambiguous"] = False
     return d
+
+
+STABILIZATION_LABELS = ("static", "handheld", "stabilized", "tripod", "gimbal", "steadicam", "vehicle_mount", "drone", "unknown")
+_STABILIZATION_ALIASES = {"stable": "stabilized", "stabilised": "stabilized", "shaky": "handheld", "hand-held": "handheld", "hand_held": "handheld", "car_mount": "vehicle_mount", "vehicle": "vehicle_mount", "aerial": "drone", "none": "unknown"}
+
+
+def normalize_stabilization(value: Any) -> str:
+    """Free text -> one of ``STABILIZATION_LABELS``; anything unrecognised is ``unknown``."""
+    text = str(value or "").strip().lower().replace(" ", "_")
+    text = _STABILIZATION_ALIASES.get(text, text)
+    return text if text in STABILIZATION_LABELS else "unknown"
 
 
 def normalize_depth_of_field(text: Any) -> str | None:
@@ -267,10 +290,30 @@ class CameraAnnotation(BaseSchema):
     # --- lens / optics: VLM estimates only (lens_confidence_source says so); never measured ---
     lens_type: str | None = None  # wide_angle | normal | portrait | telephoto | anamorphic | fisheye | macro
     focal_length_mm: float | None = None  # full-frame-equivalent estimate, e.g. 24, 35, 50, 85
+    # container_metadata | production_metadata | model_estimate | None. Only the first two are
+    # trustworthy; ``model_estimate`` is an appearance guess and is never promoted to a fact.
+    focal_length_source: str | None = None
     depth_of_field: str | None = None  # shallow | medium | deep
     focus_type: str | None = None  # fixed | rack_focus | follow_focus | soft
     perspective: str | None = None  # e.g. "linear", "first person", "over the shoulder"
     lens_confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE
+    # --- provenance of the movement label and its ambiguity (schema 2.3.0) ---
+    camera_motion_source: str | None = None  # optical_flow | optical_flow+subject_track | vlm | None
+    # True when the measurement cannot separate the label from a look-alike (zoom vs dolly, tracking
+    # vs pan, low flow consistency); ``movement_alternatives`` lists the other readings. Ambiguous
+    # labels are routed to review and never count as verified camera motion.
+    movement_ambiguous: bool = False
+    movement_alternatives: list[str] = Field(default_factory=list)
+    # --- stabilisation with evidence ---
+    stabilization_evidence: str | None = None  # optical_flow_jitter | movement_label | vlm | None
+    stabilization_confidence: float | None = Field(default=None, ge=0, le=1)
+    # --- camera pose: only an estimator with a documented method may fill it; otherwise null ---
+    pose: dict[str, Any] | None = None  # {rotation: [...], translation: [...], frame: "..."} or None
+    pose_estimator: str | None = None  # name/version of the estimator that produced ``pose``
+    pose_confidence: float | None = Field(default=None, ge=0, le=1)
+    # --- focus transitions (rack focus / focus pull), localised in time, with evidence ---
+    focus_transitions: list[dict[str, Any]] = Field(default_factory=list)  # [{start_time, end_time, kind, evidence_frame_ids, confidence}]
+    focus_transition_method: str | None = None  # None = not detected by any method (the honest default)
 
     @model_validator(mode="before")
     @classmethod
@@ -315,6 +358,13 @@ class Measurements(BaseSchema):
     bright_fraction: float | None = None  # share of pixels with gray > 240
     exposure: str | None = None  # underexposed | normal | overexposed
     blockiness: float | None = None  # 8x8 block-boundary discontinuity ratio (0 = none; > ~0.35 = visible macroblocks)
+    # --- method / units of the motion and colour measurements, on the record (schema 2.3.0) ---
+    motion_method: str | None = None  # e.g. "farneback_optical_flow" (set by the scan pass)
+    motion_units: str | None = None  # "px_per_frame_at_analysis_resolution" for motion_magnitude; camera_speed_* are fraction of frame width / s
+    coordinate_convention: str | None = None  # "image: +x right, +y down; flow = apparent content motion (camera pan left -> +dx)"
+    analysis_resolution: dict[str, Any] | None = None  # {"width": analysis_width, "fps": analysis_fps}
+    color_stats_space: str | None = None  # colour space the brightness / saturation / colorfulness statistics were computed in
+    color_method: str | None = None  # how the colour statistics were computed
 
 
 class SubjectMotion(BaseSchema):
@@ -342,6 +392,10 @@ class SubjectMotion(BaseSchema):
     track_id: int | None = None  # id of the followed track (tracker method)
     n_tracks: int | None = None  # tracks of any class seen in the shot (tracker method)
     trajectory: list[list[float]] = Field(default_factory=list)  # up to 20 [t, cx, cy, area_fraction] points along the subject's path
+    # The three motion entities kept apart (schema 2.3.0): the world / background (global optical
+    # flow = ``camera_velocity``), the camera (label + where it came from) and the subject (above).
+    world_motion: dict[str, Any] | None = None  # {label: static | streams_left | ..., velocity: [vx, vy], source: "background_optical_flow"}
+    camera_motion_source: str | None = None  # optical_flow | optical_flow+subject_track | vlm: camera motion is never inferred from the subject box alone
 
 
 class FrameAnalysis(BaseSchema):

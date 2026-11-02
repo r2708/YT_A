@@ -17,6 +17,21 @@ from video_dataset.utils.io import read_json, write_json_atomic
 from video_dataset.utils.parallel import parallel_map, stage_workers
 from video_dataset.utils.progress import ProgressLog
 
+_ENGINE_PACKAGES = {"rapidocr": ("rapidocr", "rapidocr-onnxruntime", "rapidocr_onnxruntime"), "easyocr": ("easyocr",), "paddleocr": ("paddleocr",)}
+
+
+def engine_version(name: str | None) -> str | None:
+    """Installed version of the package behind an OCR engine name (provenance of every detection)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    for pkg in _ENGINE_PACKAGES.get(str(name or "").lower(), (str(name or ""),)):
+        try:
+            return version(pkg)
+        except PackageNotFoundError:
+            continue
+    return None
+
+
 
 def pick_frames_for_ocr(frames: list[Frame], max_per_scene: int) -> list[Frame]:
     by_scene: dict[str, list[Frame]] = {}
@@ -114,6 +129,7 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
                     text=det.text.strip(),
                     confidence=det.confidence,
                     bbox=det.bbox,
+                    frame_size=[int(frame.width), int(frame.height)] if frame.width and frame.height else [],
                 )
             )
     tracks = merge_detections(detections, cfg.merge_similarity, cfg.merge_max_gap_seconds)
@@ -122,7 +138,7 @@ def ocr_stage(ctx: VideoContext) -> StageOutput:
     tracks, overlays = classify_tracks(tracks, total_scenes, cfg.static_overlay_min_scene_fraction, cfg.static_overlay_min_scenes, cfg.merge_max_gap_seconds)
     n_overlay = sum(1 for t in tracks if t.is_static_overlay)
     n_fragment = sum(1 for t in tracks if t.is_fragment)
-    result = OCRResult(video_id=ctx.video_id, engine=engine.name, frames_processed=len(targets), detections=detections, tracks=tracks, static_overlays=overlays)
+    result = OCRResult(video_id=ctx.video_id, engine=engine.name, engine_version=engine_version(engine.name), frames_processed=len(targets), detections=detections, tracks=tracks, static_overlays=overlays)
     write_json_atomic(out, result)
     log.info("%d detections -> %d text tracks over %d frames (%d failures); %d overlay tracks %s, %d fragments", len(detections), len(tracks), len(targets), failures, n_overlay, overlays, n_fragment)
     return StageOutput(

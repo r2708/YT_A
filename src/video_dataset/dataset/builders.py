@@ -26,6 +26,7 @@ from video_dataset.schemas.vision import CameraMovement, SceneAnalysis, ShotType
 from video_dataset.transcription.align import segments_in_window, window_text
 from video_dataset.utils.ids import record_id
 from video_dataset.utils.text import lower_first, sentence
+from video_dataset.validation.policy import POLICY_VERSION, decide
 from video_dataset.vision.motion import MOVEMENT_PHRASES
 
 _EXPORTABLE = {ValidationStatus.ACCEPTED, ValidationStatus.REVIEW}
@@ -41,6 +42,47 @@ def generation_target_for(v: ValidationInfo | None) -> str:
 def _claims(a: SceneAnalysis) -> list[dict[str, Any]]:
     claims = a.enrichments.get("claims") if isinstance(a.enrichments, dict) else None
     return list(claims) if isinstance(claims, list) else []
+
+
+def _object_tracks(a: SceneAnalysis) -> tuple[list[dict[str, Any]], str | None]:
+    """Exported view of the tracker enrichment: ids are stable within the video as
+    ``<scene_id>:<track_id>`` (no re-identification across shots: ``track_scope = "shot"``); a
+    track with few hits for its span is flagged ``uncertain`` so identity switches are reviewable."""
+    tr = a.enrichments.get("tracking") if isinstance(a.enrichments, dict) else None
+    if not isinstance(tr, dict) or not tr.get("tracks"):
+        return [], None
+    fps = float(tr.get("fps") or 0.0)
+    out = []
+    for t in tr["tracks"]:
+        start, end, hits = float(t.get("start") or 0.0), float(t.get("end") or 0.0), int(t.get("hits") or 0)
+        expected = max(1.0, (end - start) * fps) if fps else float(hits)
+        out.append({
+            "track_id": f"{a.scene_id}:{t.get('track_id')}", "class": t.get("name"), "first_time": round(start, 3), "last_time": round(end, 3),
+            "n_frames": hits, "mean_area_fraction": t.get("mean_area_fraction"), "uncertain": bool(hits < 3 or hits / expected < 0.5),
+            "method": "yolo+iou_tracker",
+        })
+    return out, "shot"
+
+
+def _ocr_detections(ocr: OCRResult | None) -> dict[str, list[dict[str, Any]]]:
+    """Grounded OCR per frame id: text, normalised bbox (when the frame size is known), score,
+    engine + version. The pixel bbox is kept when it cannot be normalised (``bbox_units``)."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    if not ocr:
+        return out
+    version = getattr(ocr, "engine_version", None)
+    for d in ocr.detections:
+        row: dict[str, Any] = {"detection_id": d.detection_id, "text": d.text, "timestamp": d.timestamp, "confidence": d.confidence, "engine": ocr.engine, "engine_version": version}
+        if d.bbox and len(d.bbox) == 4 and d.frame_size and len(d.frame_size) == 2 and d.frame_size[0] and d.frame_size[1]:
+            w, h = float(d.frame_size[0]), float(d.frame_size[1])
+            row["bbox"] = [round(min(1.0, max(0.0, d.bbox[0] / w)), 4), round(min(1.0, max(0.0, d.bbox[1] / h)), 4), round(min(1.0, max(0.0, d.bbox[2] / w)), 4), round(min(1.0, max(0.0, d.bbox[3] / h)), 4)]
+            row["bbox_units"] = "normalized"
+            row["frame_size"] = [int(w), int(h)]
+        else:
+            row["bbox"] = list(d.bbox)
+            row["bbox_units"] = "pixels" if d.bbox else None
+        out.setdefault(d.frame_id, []).append(row)
+    return out
 
 
 def _rel(path: str | None, base: Path | None) -> str | None:
@@ -100,6 +142,7 @@ class DatasetBuilder:
         if ocr:
             for d in ocr.detections:
                 ocr_by_frame.setdefault(d.frame_id, []).append(d.text)
+        detections_by_frame = _ocr_detections(ocr)
         for vs in validated.scenes:
             if not self._keep(vs.validation):
                 continue
@@ -134,6 +177,7 @@ class DatasetBuilder:
                         environment=a.environment,
                         measurements=measurements,
                         ocr_text=sorted(set(ocr_by_frame.get(f.frame_id, []))),
+                        ocr_detections=detections_by_frame.get(f.frame_id, []),
                         quality_flags=list(a.quality_flags),
                         provider=a.provider,
                         confidence=conf,
@@ -187,6 +231,11 @@ class DatasetBuilder:
                     transcript_scope=scope,
                     frame_ids=c.frame_ids,
                     claims=_claims(a),
+                    object_tracks=_object_tracks(a)[0],
+                    boundary_repair=getattr(c, "boundary_repair", None),
+                    frame_count=getattr(c, "frame_count", None),
+                    frame_count_check=getattr(c, "frame_count_check", None),
+                    stream_integrity=getattr(c, "stream_integrity", None),
                     provider=a.provider,
                     confidence=a.confidence,
                     confidence_source=ConfidenceSource(a.confidence_source),
@@ -237,6 +286,8 @@ class DatasetBuilder:
                     clip_id=clip_by_scene[a.scene_id].clip_id if a.scene_id in clip_by_scene else None,
                     measurements=a.measurements,
                     claims=_claims(a),
+                    object_tracks=_object_tracks(a)[0],
+                    track_scope=_object_tracks(a)[1],
                     provider=a.provider,
                     confidence=a.confidence,
                     confidence_source=ConfidenceSource(a.confidence_source),
@@ -411,8 +462,37 @@ class DatasetBuilder:
         conf = round(min(c for c in confs if c is not None), 3) if confs and all(c is not None for c in confs) else None
         members = [vs for vs in kept if vs.analysis.scene_id in {s.scene_id for s in group}]
         statuses = [vs.validation.status for vs in members]
-        status = ValidationStatus.REVIEW if any(st == ValidationStatus.REVIEW for st in statuses) else ValidationStatus.ACCEPTED
-        policies = {vs.validation.policy_version for vs in members}
+        semantics = {vs.validation.semantic_verification for vs in members}
+        # --- grounding: which records the text rests on, their claims, observed vs inferred ------
+        member_analyses = [analyses[s.scene_id] for s in group]
+        claims: list[dict[str, Any]] = []
+        for a in member_analyses:
+            for c in _claims(a):
+                claims.append({**c, "scene_id": a.scene_id})
+        evidence = {
+            "scene_ids": [s.scene_id for s in group],
+            "clip_ids": [],  # filled at export from the clip records of these scenes (prompting.fill_frame_clip_ids)
+            "frame_ids": [fid for a in member_analyses for fid in a.frame_ids][:64],
+            "timestamps": [[round(s.start_time, 3), round(s.end_time, 3)] for s in group],
+        }
+        observed = [f"{c.get('field')}={c.get('value')} ({c.get('scene_id')})" for c in claims if c.get("source") in ("measurement", "detector", "optical_flow", "measured") or str(c.get("source", "")).startswith("instrument")]
+        inferred = [f"{c.get('field')}={c.get('value')} ({c.get('scene_id')})" for c in claims if (c.get("source") not in ("measurement", "detector", "optical_flow", "measured") and not str(c.get("source", "")).startswith("instrument"))]
+        checks: dict[str, Any] = {
+            "scenes_exist": True,
+            "evidence_resolves": True,
+            "shots_cover_span": all(abs(group[i + 1].start_time - group[i].end_time) <= 0.5 for i in range(len(group) - 1)),
+            "claims_not_contradicted": not any(c.get("status") == "contradicted" for c in claims),
+            "all_shots_accepted": all(st == ValidationStatus.ACCEPTED for st in statuses),
+        }
+        hard: list[str] = []
+        issues: list[str] = []
+        if not checks["all_shots_accepted"]:
+            issues.append("contains scenes flagged for review")
+        if not checks["claims_not_contradicted"]:
+            issues.append("a member shot has a contradicted claim")
+        if not checks["shots_cover_span"]:
+            issues.append("shots do not cover the described span")
+        status, reasons = decide("video_description", checks, hard, "accepted" if checks["all_shots_accepted"] else "review", issues, (semantics.pop() if len(semantics) == 1 else None) or "not_run")
         semantics = {vs.validation.semantic_verification for vs in members}
         return VideoDescriptionRecord(
             record_id=record_id("videodesc", validated.video_id, f"{gi:02d}"),
@@ -431,13 +511,18 @@ class DatasetBuilder:
             transitions=trans_text,
             prompt=" ".join(prompt_parts),
             shots=shots,
+            evidence=evidence,
+            claims=claims,
+            facts={"observed": observed[:40], "inferred": inferred[:40]},
+            grounding_assessed=False,  # nothing compares the assembled text with the frames; grounding stays None
             confidence=conf,
             confidence_source=ConfidenceSource.DERIVED_MIN if conf is not None else ConfidenceSource.UNAVAILABLE,
-            quality=QualityScore.from_components(grounding=conf, description_quality=None),
+            # the min scene confidence is an evidence confidence, not a grounding score of this text
+            quality=QualityScore.from_components(grounding=None, description_quality=None, grounding_method="not_assessed", notes=["grounding not assessed: the description was assembled from the member shots' fields and never compared with the pixels"]),
             validation=ValidationInfo(
-                status=status, issues=[] if status == ValidationStatus.ACCEPTED else ["contains scenes flagged for review"],
-                policy_version=policies.pop() if len(policies) == 1 else None,
+                status=status, issues=hard + issues, checks=checks,
+                policy_version=POLICY_VERSION,
                 semantic_verification=semantics.pop() if len(semantics) == 1 else None,
-                reason_codes=[] if status == ValidationStatus.ACCEPTED else ["scenes_in_review"],
+                reason_codes=reasons,
             ),
         )

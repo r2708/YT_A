@@ -104,6 +104,10 @@ class Clip(TimeSpan):
     actual_end: float | None = None  # source time of the last frame in the file (boundary check)
     boundary_error_seconds: float | None = None  # max(|actual_start - start_time|, |actual_end - end_time|)
     boundary_check: str = "not_run"  # passed | failed | not_run | error (frame-hash comparison with the source)
+    boundary_repair: str | None = None  # repaired | still_failed: the clip was re-cut once after a failed boundary check
+    frame_count: int | None = None  # frames in the written file (ffprobe nb_frames / OpenCV)
+    frame_count_check: str | None = None  # passed | failed | not_run: frame_count vs round(media_duration * fps)
+    stream_integrity: str | None = None  # passed | failed | not_run: video stream present (+ audio stream when the source has audio)
 
 
 class SceneDetectionResult(BaseSchema):

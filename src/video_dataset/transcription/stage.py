@@ -6,6 +6,7 @@ from video_dataset.pipeline.context import StageOutput, VideoContext
 from video_dataset.schemas.scene import SceneDetectionResult
 from video_dataset.schemas.transcript import Transcript
 from video_dataset.stages import Stage
+from video_dataset.transcription.align import validate_alignment
 from video_dataset.transcription.base import create_transcriber
 from video_dataset.utils.io import read_json, write_json_atomic
 
@@ -36,11 +37,16 @@ def transcription_stage(ctx: VideoContext) -> StageOutput:
     transcript = transcriber.transcribe(wav, ctx.video_id)
     transcript.status = "transcribed"  # ASR ran; an empty segment list now really means "no speech detected"
     transcript = attach_scene_ids(transcript, scenes)
+    try:
+        audio_duration = float(ctx.media_info.duration)
+    except (FileNotFoundError, TypeError, ValueError):
+        audio_duration = None
+    alignment = validate_alignment(transcript, audio_duration, float(getattr(cfg, "alignment_tolerance_seconds", 0.25) or 0.25))
     write_json_atomic(out, transcript)
     words = sum(len(s.text.split()) for s in transcript.segments)
-    log.info("%d segments, %d words, language=%s", len(transcript.segments), words, transcript.language)
+    log.info("%d segments, %d words, language=%s, alignment %s", len(transcript.segments), words, transcript.language, alignment)
     return StageOutput(
         artifact_path=str(out),
-        metrics={"segments": len(transcript.segments), "words": words, "language": transcript.language, "provider": transcriber.name, "model": transcriber.model_name},
+        metrics={"segments": len(transcript.segments), "words": words, "language": transcript.language, "provider": transcriber.name, "model": transcriber.model_name, "alignment": alignment},
         message=f"{len(transcript.segments)} transcript segments",
     )

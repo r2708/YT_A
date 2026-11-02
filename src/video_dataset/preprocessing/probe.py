@@ -78,6 +78,11 @@ def _from_ffprobe(path: Path, data: dict[str, Any]) -> MediaInfo:
         has_audio=audio is not None,
         audio=audio_info,
         size_bytes=_int(fmt.get("size")) or path.stat().st_size,
+        pix_fmt=video.get("pix_fmt") or None,
+        color_space=video.get("color_space") or None,
+        color_transfer=video.get("color_transfer") or None,
+        color_primaries=video.get("color_primaries") or None,
+        color_range=video.get("color_range") or None,
     )
 
 

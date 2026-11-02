@@ -20,7 +20,6 @@ from video_dataset.schemas.transcript import Transcript
 from video_dataset.schemas.vision import SceneAnalysis
 from video_dataset.temporal.timeline import describable
 from video_dataset.utils.ids import qa_id as make_qa_id
-from video_dataset.validation.text_checks import answer_type_for
 from video_dataset.utils.text import (
     approx_duration_phrase,
     approx_timestamp_phrase,
@@ -28,6 +27,7 @@ from video_dataset.utils.text import (
     normalize_text,
     sentence,
 )
+from video_dataset.validation.text_checks import answer_type_for
 
 
 @dataclass

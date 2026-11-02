@@ -118,14 +118,22 @@ def verify_media(
             frame_stats["unreadable"] += 1
             note(vid, "frame", "unreadable", path)
             continue
+        h, w = img.shape[:2]
+        if w < 16 or h < 16:
+            frame_stats["unreadable"] += 1
+            note(vid, "frame", "unreadable", path, f"{w}x{h}")
+            continue
+        if p.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+            note(vid, "frame", "unexpected_format", path, p.suffix)
         frame_stats["ok"] += 1
 
     # ---- videos without any media at all --------------------------------------------------------
     video_ids = {str(r.get("video_id")) for kind in DATASET_FILES for r in _records(final, kind) if kind in ("scenes", "clips", "frames")}
     media_less = sorted(v for v in video_ids if per_video.get(v, {}).get("missing", 0) and not any(k in ("ok",) for k in per_video.get(v, {})))
     report = {
-        "final_dir": str(final),
-        "data_dir": str(data_dir),
+        "final_dir": final.name,  # the report may be published with the data: no machine path
+        "data_dir": data_dir.name,
+        "frames_decoded": "all" if frames_per_video is None else int(frames_per_video),
         "clips": clip_stats,
         "frames": frame_stats,
         "videos_with_problems": len(per_video),

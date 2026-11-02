@@ -44,6 +44,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", help="write the full comparison to this file")
     ap.add_argument("--no-server", action="store_true", help="skip the datasets-server (viewer) comparison")
+    ap.add_argument("--no-checksums", action="store_true", help="skip verifying each shard's checksums.sha256 against the Hub's LFS hashes")
     ap.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE")
     args = ap.parse_args()
 
@@ -109,6 +110,30 @@ def main() -> int:
             if splits and not int(splits.get(sp, 0)):
                 problems.append(f"{name}: {sp} split is empty")
         print(f"{name}: " + ", ".join(f"{t}={row[t]['parquet']}" for t in DATASET_FILES) + f"; videos={listed}, splits={splits}")
+
+        # checksums.sha256 of the shard vs the LFS sha256 the Hub stores (P3-09: verify after upload)
+        if not args.no_checksums and f"{path_in_repo}/checksums.sha256" in all_files:
+            try:
+                from video_dataset.dataset.inventory import read_checksums
+
+                local = read_checksums(Path(hf_hub_download(up.repo_id, f"{path_in_repo}/checksums.sha256", repo_type=up.repo_type, token=token)))
+                remote: dict[str, str | None] = {}
+                for item in api.list_repo_tree(up.repo_id, path_in_repo=path_in_repo, repo_type=up.repo_type, recursive=True, expand=True):
+                    if item.__class__.__name__ == "RepoFile":
+                        lfs = getattr(item, "lfs", None)
+                        remote[item.path[len(path_in_repo) + 1:]] = getattr(lfs, "sha256", None) if lfs is not None else None
+                bad = [f for f, sha in local.items() if remote.get(f) and remote[f] != sha]
+                gone = [f for f in local if f not in remote]
+                n_ok = sum(1 for f, sha in local.items() if remote.get(f) == sha)
+                print(f"{name}: checksums {n_ok} verified, {sum(1 for f in local if f in remote and not remote[f])} non-LFS (not verifiable), {len(bad)} mismatched, {len(gone)} missing")
+                for f in bad[:10]:
+                    problems.append(f"{name}/{f}: sha256 on the Hub differs from checksums.sha256")
+                for f in gone[:10]:
+                    problems.append(f"{name}/{f}: listed in checksums.sha256 but not on the Hub")
+            except Exception as exc:
+                problems.append(f"{name}: checksum verification failed ({str(exc)[:80]})")
+        elif not args.no_checksums:
+            problems.append(f"{name}: no checksums.sha256 (shard predates the inventory; re-annotate it)")
 
     server = {} if args.no_server else _sizes_from_server(up.repo_id, token)
     for rtype, n in totals.items():
