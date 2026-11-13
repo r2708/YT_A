@@ -55,3 +55,21 @@ def test_confidence_helpers():
     assert transition_confidence(27.0, 27.0) == 0.5
     assert transition_confidence(54.0, 27.0) == 1.0
     assert transition_confidence(500.0, 27.0) == 1.0
+
+
+def test_long_range_links_are_capped_per_event_and_nearest_first():
+    # 120 on-screen text events every 10 s that all share one entity: the unbounded pass produced
+    # a BEFORE link for every later match (O(n^2)); now each source links to its nearest N matches only
+    cfg = load_config(None, {"temporal.long_range_min_gap_seconds": "20", "temporal.long_range_max_links_per_event": "2"}).temporal
+    events = [_ev(i, i * 10.0, i * 10.0 + 1.0, "Channel name on screen", EventType.TEXT_ON_SCREEN, entities=["channel name"], scenes=[f"scene_{i:03d}"]) for i in range(1, 121)]
+    rels = RelationBuilder(cfg).build("v", events)
+    lr = [r for r in rels if r.derivation == "long_range_shared_entity"]
+    per_source: dict[str, list[str]] = {}
+    for r in lr:
+        per_source.setdefault(r.event_a, []).append(r.event_b)
+    assert per_source and all(len(v) <= 2 for v in per_source.values())
+    # event_0001 spans 10-11 s -> first eligible start is >= 31 s: event_0004 (40 s), then event_0005 (50 s)
+    assert per_source["event_0001"] == ["event_0004", "event_0005"]
+    assert all(r.gap_seconds is not None and r.gap_seconds >= 20 for r in lr)
+    off = load_config(None, {"temporal.long_range_max_links_per_event": "0"}).temporal
+    assert not [r for r in RelationBuilder(off).build("v", events) if r.derivation == "long_range_shared_entity"]

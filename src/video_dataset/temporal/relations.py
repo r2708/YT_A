@@ -3,6 +3,8 @@ rule-based CONTINUES / INTERRUPTS / CHANGES_TO. CAUSES is only produced by an ex
 
 from __future__ import annotations
 
+from bisect import bisect_left
+
 from video_dataset.config import TemporalConfig
 from video_dataset.schemas.common import ConfidenceSource
 from video_dataset.schemas.events import Event, EventType, RelationType, TemporalRelation
@@ -117,18 +119,39 @@ class RelationBuilder:
                 if rel == RelationType.DURING and s.event_type in (EventType.SOUND, EventType.TRANSITION) and o.event_type in (EventType.SPEECH, EventType.ACTION, EventType.CAMERA) and s.start_time > o.start_time + self.tol and s.duration < o.duration / 2:
                     add(RelationType.INTERRUPTS, s, o, derivation="short_disruptive_event_inside_longer_event", rationale=f"{s.event_type} occurs in the middle of {o.event_type}")
 
-        # Long-range links: same (non-generic) entity far apart in time
+        # Long-range links: same (non-generic) entity far apart in time. Events are indexed by entity and
+        # each source event links to at most ``long_range_max_links_per_event`` of the nearest later matches.
+        # The previous all-pairs scan was O(n^2): a 4.8 h video with 131k events (122k of them repeated
+        # on-screen text) produced 6.6M long-range links that no later stage could hold in memory.
         min_gap = float(self.cfg.long_range_min_gap_seconds)
-        for i, a in enumerate(evs):
-            if a.event_type not in (EventType.ACTION, EventType.APPEARANCE, EventType.TEXT_ON_SCREEN, EventType.SOUND):
-                continue
-            for b in evs[i + 1 :]:
-                gap = b.start_time - a.end_time
-                if gap < min_gap:
+        max_links = int(getattr(self.cfg, "long_range_max_links_per_event", 3))
+        if max_links > 0:
+            ents = [frozenset(normalize_text(x) for x in e.entities) - _GENERIC_ENTITIES - {""} for e in evs]
+            by_entity: dict[str, list[int]] = {}
+            for idx, es in enumerate(ents):
+                for ent in es:
+                    by_entity.setdefault(ent, []).append(idx)
+            starts = [e.start_time for e in evs]
+            for i, a in enumerate(evs):
+                if a.event_type not in (EventType.ACTION, EventType.APPEARANCE, EventType.TEXT_ON_SCREEN, EventType.SOUND) or not ents[i]:
                     continue
-                shared = shared_entities(a, b)
-                if shared and not (set(a.scene_ids) & set(b.scene_ids)):
-                    add(RelationType.BEFORE, a, b, derivation="long_range_shared_entity", rationale=f"long_range; shared entities: {', '.join(sorted(shared))}", gap=gap)
+                scenes_a = set(a.scene_ids)
+                threshold = a.end_time + min_gap
+                candidates: set[int] = set()
+                for ent in ents[i]:
+                    idxs = by_entity[ent]
+                    taken = 0
+                    for j in idxs[bisect_left(idxs, threshold, key=starts.__getitem__):]:
+                        if taken >= max_links:
+                            break
+                        if j <= i or scenes_a & set(evs[j].scene_ids):
+                            continue
+                        candidates.add(j)
+                        taken += 1
+                for j in sorted(candidates)[:max_links]:
+                    b = evs[j]
+                    shared = ents[i] & ents[j]
+                    add(RelationType.BEFORE, a, b, derivation="long_range_shared_entity", rationale=f"long_range; shared entities: {', '.join(sorted(shared))}", gap=b.start_time - a.end_time)
 
         for k, r in enumerate(rels, start=1):
             r.relation_id = make_relation_id(k)

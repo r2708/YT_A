@@ -256,6 +256,7 @@ class TemporalConfig(_Section):
     max_relation_neighbors: int = 6
     emit_inverse_relations: bool = True
     long_range_min_gap_seconds: float = 20.0
+    long_range_max_links_per_event: int = 3  # nearest later events sharing an entity; 0 disables long-range links
     causal_inference: str = "none"  # none | llm
     speech_min_words: int = 3
 

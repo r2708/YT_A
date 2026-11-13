@@ -191,6 +191,7 @@ temporal:
   max_relation_neighbors: 6
   emit_inverse_relations: true
   long_range_min_gap_seconds: 20.0
+  long_range_max_links_per_event: 3  # per source event, nearest later events sharing an entity (0 = off); unbounded was O(n^2)
   causal_inference: none   # none | llm (requires llm.provider)
   speech_min_words: 3
 

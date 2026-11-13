@@ -188,6 +188,8 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
     scene_ids = {s.scene_id for s in scenes}
     frames = {f.frame_id: f for f in sampling.frames}
     clips = {c.clip_id: c for c in sampling.clips}
+    known_frames = set(frames)  # built once: these sets were rebuilt per record, which is quadratic on long videos
+    known_clips = set(clips)
     scans = {s.scene_id: s for s in sampling.scans}
     frames_by_scene: dict[str, list] = {}
     for f in sampling.frames:
@@ -224,7 +226,7 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         checks["scene_exists"] = ok
         if not ok:
             hard.append(msg or "unknown scene")
-        ok, msg = check_ids_exist(a.frame_ids, set(frames), "frame_id")
+        ok, msg = check_ids_exist(a.frame_ids, known_frames, "frame_id")
         checks["frames_exist"] = ok
         if not ok:
             (hard if vcfg.reject_on_missing_files else issues).append(msg or "unknown frames")
@@ -414,11 +416,11 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         checks["scenes_exist"] = ok
         if not ok:
             hard.append(msg or "unknown scene")
-        ok, msg = check_ids_exist(e.frame_ids, set(frames), "frame_id")
+        ok, msg = check_ids_exist(e.frame_ids, known_frames, "frame_id")
         checks["frames_exist"] = ok
         if not ok:
             (hard if vcfg.reject_on_missing_files else issues).append(msg or "unknown frames")
-        ok, msg = check_ids_exist(e.clip_ids, set(clips), "clip_id")
+        ok, msg = check_ids_exist(e.clip_ids, known_clips, "clip_id")
         checks["clips_exist"] = ok if e.clip_ids else None
         if not ok:
             issues.append(msg or "unknown clip")
@@ -487,6 +489,7 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
                 ve.validation.reason_codes.append("duplicate:text_and_window")
     event_status = {ve.event.event_id: ve.validation.status for ve in v_events}
     event_by_id: dict[str, Event] = {e.event_id: e for e in timeline.events}
+    known_events = set(event_by_id)
     # duplicate events are not exported; QA evidence that names one is pointed at the canonical copy
     # (same text, overlapping window) so no exported question references a missing event
     canonical_event = {ve.event.event_id: ve.validation.duplicate_of for ve in v_events if ve.validation.status == ValidationStatus.DUPLICATE and ve.validation.duplicate_of}
@@ -506,7 +509,7 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         hard = []
         issues = []
         checks = {}
-        ok, msg = check_ids_exist([r.event_a, r.event_b], set(event_by_id), "event_id")
+        ok, msg = check_ids_exist([r.event_a, r.event_b], known_events, "event_id")
         checks["events_exist"] = ok
         if not ok:
             hard.append(msg or "unknown event")
@@ -554,11 +557,11 @@ def validation_stage(ctx: VideoContext) -> StageOutput:
         checks["scenes_exist"] = ok
         if not ok:
             hard.append(msg or "unknown scene")
-        ok, msg = check_ids_exist(ev.event_ids, set(event_by_id), "event_id")
+        ok, msg = check_ids_exist(ev.event_ids, known_events, "event_id")
         checks["events_exist"] = ok
         if not ok:
             hard.append(msg or "unknown event")
-        ok, msg = check_ids_exist(ev.frame_ids, set(frames), "frame_id")
+        ok, msg = check_ids_exist(ev.frame_ids, known_frames, "frame_id")
         checks["frames_exist"] = ok
         if not ok:
             (hard if vcfg.reject_on_missing_files else issues).append(msg or "unknown frames")

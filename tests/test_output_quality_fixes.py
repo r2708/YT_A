@@ -72,6 +72,34 @@ def test_classify_tracks_small_videos_and_transient_text():
     assert overlays == [] and all(t.is_event_worthy for t in out)
 
 
+def test_classify_tracks_fragments_are_found_through_time_and_frame_indexes():
+    # the fragment search only looks at tracks near in time or on a shared frame: same answers as all-pairs
+    tracks = [
+        _track(1, "Breaking News Tonight", 100.0, 104.0, ["scene_001"]),
+        _track(2, "Breaking News", 106.5, 107.0, ["scene_001"]),  # 2.5 s after the full text: fragment
+        _track(3, "Breaking News", 400.0, 401.0, ["scene_002"]),  # same words minutes later: a real text
+        _track(4, "News Tonight", 900.0, 901.0, ["scene_003"], ["shared"]),  # far in time but on a shared frame
+        _track(5, "Breaking News Tonight", 2000.0, 2001.0, ["scene_004"], ["shared"]),
+        _track(6, "Long Running Banner Text", 3000.0, 3900.0, ["scene_005"]),  # spans many time buckets
+        _track(7, "Banner", 3450.0, 3451.0, ["scene_006"]),  # in the middle of the long track: fragment
+        _track(8, "Banner", 3904.0, 3905.0, ["scene_007"]),  # 4 s after it ends: not a fragment
+    ]
+    out, overlays = classify_tracks(tracks, total_scenes=40)
+    assert overlays == []
+    assert {t.track_id for t in out if t.is_fragment} == {"ocr_0002", "ocr_0004", "ocr_0007"}
+
+
+def test_classify_tracks_scales_to_long_videos():
+    import time
+
+    # 40k transient texts over ~11 h; the all-pairs version needed minutes for this
+    tracks = [_track(i, f"caption number {i % 9000} of the show", i * 1.0, i * 1.0 + 0.5, [f"scene_{i // 30:05d}"]) for i in range(40000)]
+    t0 = time.perf_counter()
+    out, overlays = classify_tracks(tracks, total_scenes=40000 // 30 + 1)
+    assert time.perf_counter() - t0 < 20.0
+    assert overlays == [] and len(out) == 40000 and not any(t.is_fragment for t in out)
+
+
 def test_ocr_events_skip_overlays_by_default():
     frames = [Frame(frame_id=f"f{i}", video_id="v", scene_id=f"scene_{s:03d}", frame_index=i, timestamp=float(i), frame_path="x.jpg", width=16, height=9) for i, s in enumerate(range(1, 21), start=1)]
     ocr = OCRResult(video_id="v", engine="mock", frames_processed=20, tracks=_watermark_tracks())

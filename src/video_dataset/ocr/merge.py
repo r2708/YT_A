@@ -64,16 +64,24 @@ def classify_tracks(
     if not tracks:
         return tracks, []
     keys = {t.track_id: _family_key(t.normalized_text) for t in tracks}
-    distinct = sorted({k for k in keys.values() if k}, key=len, reverse=True)
+    # ties broken alphabetically: set order follows the per-process string hash seed, which made the
+    # family heads (and so the overlay / fragment flags) differ from run to run on the same video
+    distinct = sorted({k for k in keys.values() if k}, key=lambda k: (-len(k), k))
     # longest-first greedy family assignment: a text joins the first (longest) family it is a prefix of
+    # ``head_by_prefix`` maps every prefix (>= 2 chars) of a family head to the earliest-created head that
+    # starts with it, so the lookup is one dict probe instead of a scan over all heads (that scan was
+    # O(distinct^2): a 4.8 h video has ~150k text tracks).
     family_of: dict[str, str] = {}
+    head_by_prefix: dict[str, str] = {}
     for k in distinct:
-        for head in family_of.values():
-            if head.startswith(k) and len(k) >= 2:
-                family_of[k] = head
-                break
-        else:
-            family_of[k] = k
+        head = head_by_prefix.get(k) if len(k) >= 2 else None
+        if head is not None:
+            family_of[k] = head
+            continue
+        family_of[k] = k
+        for n in range(2, len(k) + 1):
+            head_by_prefix.setdefault(k[:n], k)
+    del head_by_prefix
     scenes_by_family: dict[str, set[str]] = {}
     for t in tracks:
         fam = family_of.get(keys[t.track_id], keys[t.track_id])
@@ -88,30 +96,62 @@ def classify_tracks(
         already attributed to a watermark, and at least 3 characters so real short words are not caught."""
         if len(key) < 3:
             return False
-        return any(_within_one_edit(key, m) and (len(key) >= 4 or key[:2] == m[:2]) for m in overlay_members if len(m) >= 3)
+        # one edit apart means the lengths differ by at most 1: only those spellings are compared
+        return any(_within_one_edit(key, m) and (len(key) >= 4 or key[:2] == m[:2]) for n in (len(key) - 1, len(key), len(key) + 1) for m in members_by_len.get(n, ()))
 
+    members_by_len: dict[int, list[str]] = {}
+    for m in overlay_members:
+        if len(m) >= 3:
+            members_by_len.setdefault(len(m), []).append(m)
+    overlay_fragment: dict[str, bool] = {}  # per distinct text: the answer does not depend on the track
+
+    # A fragment needs a longer text that is *near* it (shared frame, or within ``fragment_max_gap``
+    # seconds), so only tracks near in time or sharing a frame are compared. Comparing every track with
+    # every other one was O(n^2) and ran for hours on a 4.8 h video with ~150k tracks.
     by_time = sorted(tracks, key=lambda t: t.first_seen)
+    bucket = max(10.0, 2.0 * float(fragment_max_gap))
+    by_bucket: dict[int, list[int]] = {}
+    by_frame: dict[str, list[int]] = {}
+    for idx, t in enumerate(by_time):
+        for b in range(int(t.first_seen // bucket), int(max(t.last_seen, t.first_seen) // bucket) + 1):
+            by_bucket.setdefault(b, []).append(idx)
+        for fid in t.frame_ids:
+            by_frame.setdefault(fid, []).append(idx)
+    track_keys = [keys[t.track_id] for t in by_time]
+
     out: list[OCRTrack] = []
-    for t in by_time:
-        key = keys[t.track_id]
+    for i, t in enumerate(by_time):
+        key = track_keys[i]
         fam = family_of.get(key, key)
         is_overlay = fam in overlays
         is_fragment = False
         if not is_overlay and key:
-            if any(key != ov and key in ov for ov in overlays) or misread_of_overlay(key):
+            from_overlay = overlay_fragment.get(key)
+            if from_overlay is None:
+                from_overlay = overlay_fragment[key] = any(key != ov and key in ov for ov in overlays) or misread_of_overlay(key)
+            if from_overlay:
                 is_fragment = True  # partial read or one-character misread of a watermark
             else:
-                frames = set(t.frame_ids)
-                for other in by_time:
-                    ok = keys[other.track_id]
-                    if other.track_id == t.track_id or len(ok) <= len(key) or key not in ok:
-                        continue
-                    near = bool(frames & set(other.frame_ids)) or (
-                        other.first_seen - fragment_max_gap <= t.last_seen and t.first_seen <= other.last_seen + fragment_max_gap
-                    )
-                    if near:
+                klen = len(key)
+                # a shared frame makes two tracks near regardless of their timestamps
+                for fid in t.frame_ids:
+                    if any(j != i and len(track_keys[j]) > klen and key in track_keys[j] for j in by_frame[fid]):
                         is_fragment = True
                         break
+                if not is_fragment:
+                    lo = int((t.first_seen - fragment_max_gap) // bucket)
+                    hi = int((t.last_seen + fragment_max_gap) // bucket)
+                    for b in range(lo, hi + 1):
+                        for j in by_bucket.get(b, ()):
+                            ok = track_keys[j]
+                            if j == i or len(ok) <= klen or key not in ok:
+                                continue
+                            other = by_time[j]
+                            if other.first_seen - fragment_max_gap <= t.last_seen and t.first_seen <= other.last_seen + fragment_max_gap:
+                                is_fragment = True
+                                break
+                        if is_fragment:
+                            break
         out.append(t.model_copy(update={"is_static_overlay": is_overlay, "is_fragment": is_fragment, "overlay_family": fam if is_overlay else None}))
     out.sort(key=lambda t: t.track_id)
     return out, sorted(overlays)
