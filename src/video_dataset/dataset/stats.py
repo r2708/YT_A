@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from video_dataset.schemas.quality import ValidationStatus
@@ -233,7 +233,7 @@ _DURATION_BUCKETS = [(0, 2, "<2s"), (2, 5, "2-5s"), (5, 10, "5-10s"), (10, 30, "
 _AESTHETIC_BUCKETS = [(0, 4, "<4"), (4, 5, "4-5"), (5, 6, "5-6"), (6, 7, "6-7"), (7, 11, ">=7")]
 
 
-def _bucket(value: float | None, buckets: list[tuple[float, float, str]]) -> str:
+def _bucket(value: float | None, buckets: Sequence[tuple[float, float, str]]) -> str:
     if value is None:
         return "unknown"
     for lo, hi, name in buckets:

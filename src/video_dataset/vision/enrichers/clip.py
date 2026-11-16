@@ -116,7 +116,7 @@ def apply_clip_aesthetic(analysis: SceneAnalysis, enrichment: dict[str, Any] | N
     aes = (enrichment or {}).get("aesthetic") or {}
     if aes.get("mean") is None:
         return
-    update = {"aesthetic_score": float(aes["mean"]), "aesthetic_model": aes.get("model")}
+    update: dict[str, Any] = {"aesthetic_score": float(aes["mean"]), "aesthetic_model": aes.get("model")}
     analysis.measurements = analysis.measurements.model_copy(update=update) if analysis.measurements is not None else Measurements(**update)
 
 

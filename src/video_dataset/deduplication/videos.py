@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from video_dataset.storage.state_db import StateDB
 from video_dataset.utils.imagehash import jaccard_hashes
@@ -40,7 +40,7 @@ def fingerprint_similarity(a: Iterable[str], b: Iterable[str]) -> float:
     return jaccard_hashes(set(a), set(b))
 
 
-def near_duplicate_videos(fingerprints: dict[str, Iterable[str]], threshold: float = 0.8, min_hashes: int = 8) -> dict[str, str]:
+def near_duplicate_videos(fingerprints: Mapping[str, Iterable[str]], threshold: float = 0.8, min_hashes: int = 8) -> dict[str, str]:
     """{video_id: canonical_video_id} over a set of fingerprints. The canonical video of a group is
     the one with the smallest id, so the mapping is stable across runs. Videos with fewer than
     ``min_hashes`` distinct hashes (very short / static content) are never matched."""

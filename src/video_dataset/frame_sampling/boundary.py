@@ -73,13 +73,13 @@ def clip_edge_frames(path: Path, width: int = 160) -> tuple[np.ndarray | None, n
             # short / unindexed file: read it through
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             count = 0
-            img = None
+            tail = None
             while True:
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
-                img, count = frame, count + 1
-            last, n = (img if img is not None else first), max(count, 1)
+                tail, count = frame, count + 1
+            last, n = (tail if tail is not None else first), max(count, 1)
         return _small(first, width), _small(last, width), n
     finally:
         cap.release()

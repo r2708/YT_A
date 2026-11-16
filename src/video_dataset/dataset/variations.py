@@ -64,9 +64,9 @@ def _pick(rng: random.Random, options: list[str]) -> str:
 
 def prompt_facts(rec: dict[str, Any]) -> dict[str, Any]:
     """The facts ``generation_prompt`` is built from, as a dict (None where the record has nothing)."""
-    cam = rec.get("camera") if isinstance(rec.get("camera"), dict) else {}
-    env = rec.get("environment") if isinstance(rec.get("environment"), dict) else {}
-    meas = rec.get("measurements") if isinstance(rec.get("measurements"), dict) else {}
+    cam: dict[str, Any] = rec["camera"] if isinstance(rec.get("camera"), dict) else {}
+    env: dict[str, Any] = rec["environment"] if isinstance(rec.get("environment"), dict) else {}
+    meas: dict[str, Any] = rec["measurements"] if isinstance(rec.get("measurements"), dict) else {}
     duration = rec.get("duration")
     if duration is None and rec.get("start_time") is not None and rec.get("end_time") is not None:
         duration = float(rec["end_time"]) - float(rec["start_time"])

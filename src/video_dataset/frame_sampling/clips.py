@@ -54,7 +54,7 @@ class ClipStats:
         }
 
 
-def probe_clip(path: Path, ffprobe_path: str | None = None) -> dict[str, float | int | bool | None]:
+def probe_clip(path: Path, ffprobe_path: str | None = None) -> dict[str, Any]:
     """duration / fps / width / height / frame_count / has_video / has_audio of a media file
     (ffprobe, OpenCV fallback); None when unknown. ``frame_count`` is the stream's ``nb_frames``
     (or the OpenCV frame count) so a clip can be checked for dropped / duplicated frames."""
@@ -213,7 +213,7 @@ def _cut_one(
     out = out_dir / f"{cid}.mp4"
     delta: dict[str, float] = {"stream_copied": 0, "reencoded": 0, "reused": 0, "error": 0.0, "boundary_checked": 0, "boundary_failed": 0, "boundary_errors": 0, "boundary_error": 0.0}
     produced_by: str | None = None
-    probe: dict[str, float | int | None] = {"duration": None, "fps": None, "width": None, "height": None}
+    probe: dict[str, Any] = {"duration": None, "fps": None, "width": None, "height": None}
     try:
         if out.exists() and out.stat().st_size > 0:
             probe = probe_clip(out, ffprobe_path)

@@ -53,9 +53,8 @@ def word_shaped(token: str) -> bool:
         return False
     upper = sum(ch.isupper() for ch in token)
     lower = sum(ch.islower() for ch in token)
-    if upper >= 4 and 1 <= lower <= 2 and _LOWER_INSIDE_CAPS.search(token):
-        return False  # "SCENICRnIAX": a lowercase glyph OCR dropped into a capitalised word
-    return True
+    # "SCENICRnIAX": a lowercase glyph OCR dropped into a capitalised word
+    return not (upper >= 4 and 1 <= lower <= 2 and _LOWER_INSIDE_CAPS.search(token))
 
 
 def looks_like_text(text: str, min_chars: int = 4) -> bool:

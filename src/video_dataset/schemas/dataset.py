@@ -285,7 +285,7 @@ class VideoDescriptionRecord(_Curated):
     claims: list[dict[str, Any]] = Field(default_factory=list)  # claim-level evidence of the member shots (field, value, source, status)
     # Observed facts (measured / detected, with the shot they come from) separated from inferred or
     # free-text interpretation, so a reader can tell which sentences are evidence-backed
-    facts: dict[str, list[str]] = Field(default_factory=lambda: {"observed": [], "inferred": []})
+    facts: dict[str, list[str]] = Field(default_factory=lambda: dict[str, list[str]](observed=[], inferred=[]))
     grounding_assessed: bool = False  # True only when the description was compared with its frames / clips
     confidence: float | None = None
     confidence_source: ConfidenceSource = ConfidenceSource.UNAVAILABLE

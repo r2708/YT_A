@@ -301,7 +301,7 @@ class PipelineRunner:
                     len(result.stages_run), len(result.stages_cached), len(result.stages_skipped),
                 )
             else:
-                log.error("=== %s FAILED at %s after %s: %s", video_id, STAGE_LABELS.get(result.failed_stage, result.failed_stage), fmt_seconds(result.seconds), (result.error or "")[:200])
+                log.error("=== %s FAILED at %s after %s: %s", video_id, STAGE_LABELS.get(result.failed_stage, result.failed_stage) if result.failed_stage else None, fmt_seconds(result.seconds), (result.error or "")[:200])
         return result
 
     # ------------------------------------------------------------------ batch

@@ -328,9 +328,9 @@ def build_repair_queues(
 
 
 def lineage_row(
-    record_id: str,
+    record_id: str | None,
     record_type: str,
-    video_id: str,
+    video_id: str | None,
     change: str,
     previous: Any,
     new: Any,

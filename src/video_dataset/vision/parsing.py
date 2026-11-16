@@ -182,7 +182,7 @@ def parse_camera(v: Any) -> CameraAnnotation:
         shot_type=coerce_enum(v.get("shot_type") or v.get("shot_size"), ShotType, ShotType.UNKNOWN),
         camera_angle=coerce_enum(v.get("camera_angle") or v.get("angle"), CameraAngle, CameraAngle.UNKNOWN),
         movement=coerce_enum(v.get("movement"), CameraMovement, CameraMovement.UNKNOWN),
-        camera_movement=_str(v.get("camera_movement")),  # family (+ direction) when the model answers in taxonomy form
+        camera_movement=_str(v.get("camera_movement")),  # type: ignore[arg-type]  # coerced by the model validator; family (+ direction) when the model answers in taxonomy form
         movement_direction=_str(v.get("movement_direction")),
         zoom=_str(v.get("zoom")),
         stability=_str(v.get("stability")) or _str(v.get("stabilization")),

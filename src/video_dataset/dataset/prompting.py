@@ -110,9 +110,9 @@ def camera_phrase(cam: dict[str, Any] | None) -> str | None:
 
 def generation_prompt(rec: dict[str, Any]) -> str | None:
     """Text-to-video prompt for a scene / clip record dict (None when nothing beyond timing is known)."""
-    cam = rec.get("camera") if isinstance(rec.get("camera"), dict) else {}
-    env = rec.get("environment") if isinstance(rec.get("environment"), dict) else {}
-    meas = rec.get("measurements") if isinstance(rec.get("measurements"), dict) else {}
+    cam: dict[str, Any] = rec["camera"] if isinstance(rec.get("camera"), dict) else {}
+    env: dict[str, Any] = rec["environment"] if isinstance(rec.get("environment"), dict) else {}
+    meas: dict[str, Any] = rec["measurements"] if isinstance(rec.get("measurements"), dict) else {}
     duration = rec.get("duration")
     if duration is None and rec.get("start_time") is not None and rec.get("end_time") is not None:
         duration = float(rec["end_time"]) - float(rec["start_time"])

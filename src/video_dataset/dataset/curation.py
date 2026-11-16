@@ -291,8 +291,8 @@ def video_info_from_manifests(manifests: list[dict[str, Any]], similarity_thresh
         if m.get("fingerprint"):
             fingerprints[str(vid)] = list(m["fingerprint"])
     if fingerprint_enabled and len(fingerprints) > 1:
-        for vid, canon in near_duplicate_videos(fingerprints, similarity_threshold).items():
-            info.setdefault(vid, {})["canonical_video_id"] = canon
+        for vid, dup_of in near_duplicate_videos(fingerprints, similarity_threshold).items():
+            info.setdefault(vid, {})["canonical_video_id"] = dup_of
     # resolve chains (a -> b -> c) and never let a video be its own canonical
     for vid, d in info.items():
         canon = d.get("canonical_video_id")
@@ -325,8 +325,8 @@ def _provenance_block(rec: dict[str, Any], base: dict[str, Any] | None, now: str
     from video_dataset.validation.policy import POLICY_VERSION
 
     base = base or {}
-    v = rec.get("validation") if isinstance(rec.get("validation"), dict) else {}
-    q = rec.get("quality") if isinstance(rec.get("quality"), dict) else {}
+    v: dict[str, Any] = rec["validation"] if isinstance(rec.get("validation"), dict) else {}
+    q: dict[str, Any] = rec["quality"] if isinstance(rec.get("quality"), dict) else {}
     template = rec.get("template_id") or (TEMPLATE_VERSION if rec.get("generation_prompt") or rec.get("prompt") else None)
     if rec.get("generator"):
         template = f"{rec.get('generator')}:{rec.get('template_id') or 'unknown'}"
@@ -350,7 +350,7 @@ def annotate_records(
     seed: int | str = 1234,
     provenance_base: dict[str, Any] | None = None,
     calibration: dict[str, Any] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Fill split / tier / tier_reasons / subsets / canonical_video_id on every record dict in place,
     link frames to their clip, attach generation prompts (+ variants) to scene / clip records,
     (re)build the ``sequences`` records, run the export-time checks (timestamps, sequence /
@@ -384,7 +384,7 @@ def annotate_records(
     for rec in records.get("clips", []):
         clips_by_scene.setdefault((str(rec.get("video_id")), str(rec.get("scene_id"))), []).append(str(rec.get("clip_id")))
     for rec in records.get("video_descriptions", []):
-        ev = rec.get("evidence") if isinstance(rec.get("evidence"), dict) else {}
+        ev: dict[str, Any] = rec["evidence"] if isinstance(rec.get("evidence"), dict) else {}
         ev = {"scene_ids": list(rec.get("scene_ids") or []), "clip_ids": [], "frame_ids": [], "timestamps": [], **ev}
         ev["clip_ids"] = [c for sid in (rec.get("scene_ids") or []) for c in clips_by_scene.get((str(rec.get("video_id")), str(sid)), [])]
         rec["evidence"] = ev
@@ -392,7 +392,7 @@ def annotate_records(
     check_counts = fill_export_checks(records, durations)
     continuity_counts = fill_continuity(records)
 
-    counts = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0, "strict": 0, "dropped_rights_records": 0, "policy_downgraded": 0, "export_checks": check_counts, "continuity": continuity_counts}
+    counts: dict[str, Any] = {"cinematic": 0, "cinematic_scenes": 0, "sequences": len(records["sequences"]), "duplicate_videos": 0, "licensed_videos": 0, "dropped_duplicate_records": 0, "strict": 0, "dropped_rights_records": 0, "policy_downgraded": 0, "export_checks": check_counts, "continuity": continuity_counts}
     enforce = bool(getattr(cfg, "enforce_policy", True))
     by_channel = bool(getattr(cfg.split, "group_by_channel", False))
     calibrated = set((calibration or {}).get("by_source", {}).keys()) if isinstance(calibration, dict) else set()

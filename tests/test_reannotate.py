@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pyarrow.parquet as pq
+import pytest
 
 from video_dataset.config import load_config
 from video_dataset.dataset.reannotate import load_shard, reannotate_shard, rebuild_hard_negatives
@@ -134,6 +135,7 @@ def test_reannotate_fails_closed_on_legacy_accepted_records(tmp_path: Path):
 
 
 def test_push_shard_uploads_in_small_commits_and_retries(tmp_path: Path, monkeypatch):
+    pytest.importorskip("huggingface_hub")
     from video_dataset.dataset import reannotate as mod
 
     shard = _legacy_shard(tmp_path)
@@ -207,6 +209,7 @@ def test_hf_reannotate_all_worker_rewrites_gates_and_reports(tmp_path: Path, mon
 
 def test_hf_reannotate_all_parent_runs_child_pushes_marks_done_and_cleans(tmp_path: Path, monkeypatch, capsys):
     """Parent flow with a fake Hub: child process per shard, push, done marker, local cleanup, resume."""
+    pytest.importorskip("huggingface_hub")
     import importlib.util
 
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "hf_reannotate_all.py"

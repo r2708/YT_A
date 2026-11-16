@@ -106,7 +106,7 @@ def _event_from_record(rec: dict[str, Any]) -> Event | None:
             start_time=rec["start_time"], end_time=rec["end_time"], event=rec["event"],
             entities=rec.get("entities") or [], action=rec.get("action"), scene_ids=rec.get("scene_ids") or [],
             frame_ids=rec.get("frame_ids") or [], clip_ids=rec.get("clip_ids") or [], source=rec["source"],
-            confidence=rec.get("confidence"), confidence_source=rec.get("confidence_source") or "unavailable",
+            confidence=rec.get("confidence"), confidence_source=rec.get("confidence_source") or "unavailable",  # type: ignore[arg-type]  # pydantic coerces dicts / strings
         )
     except Exception as exc:  # pragma: no cover - malformed legacy row
         log.debug("skipping event %s: %s", rec.get("event_id"), exc)
@@ -126,9 +126,9 @@ def _analysis_from_scene(rec: dict[str, Any]) -> SceneAnalysis | None:
             objects = [ObjectAnnotation(name=str(n)) for n in (rec.get("objects") or [])]
         return SceneAnalysis(
             scene_id=rec["scene_id"], video_id=rec["video_id"], start_time=rec["start_time"], end_time=rec["end_time"],
-            summary=rec.get("summary"), environment=rec.get("environment") or {}, objects=objects, actions=rec.get("actions") or [],
-            camera=rec.get("camera") or {}, visual_style=rec.get("visual_style") or {}, measurements=rec.get("measurements"),
-            provider=rec.get("provider"), confidence=rec.get("confidence"), confidence_source=rec.get("confidence_source") or "unavailable",
+            summary=rec.get("summary"), environment=rec.get("environment") or {}, objects=objects, actions=rec.get("actions") or [],  # type: ignore[arg-type]  # pydantic coerces dicts / strings
+            camera=rec.get("camera") or {}, visual_style=rec.get("visual_style") or {}, measurements=rec.get("measurements"),  # type: ignore[arg-type]  # pydantic coerces dicts / strings
+            provider=rec.get("provider"), confidence=rec.get("confidence"), confidence_source=rec.get("confidence_source") or "unavailable",  # type: ignore[arg-type]  # pydantic coerces dicts / strings
         )
     except Exception as exc:  # pragma: no cover - malformed legacy row
         log.debug("skipping scene %s: %s", rec.get("scene_id"), exc)
@@ -233,14 +233,14 @@ def reannotate_shard(shard_dir: Path, config: PipelineConfig, out_dir: Path | No
             by_video.setdefault(str(rec.get("video_id")), {n: [] for n in DATASET_FILES})[name].append(rec)
     manifest_by_video = {m.get("video_id"): m for m in manifests if m.get("video_id")}
     new_manifests: list[dict[str, Any]] = []
-    for vid, rows in sorted(by_video.items()):
+    for vid, vrows in sorted(by_video.items()):
         vdir = out / "per_video" / vid
         if (shard_dir / "per_video" / vid).exists() or out != shard_dir:
-            vcounts = write_jsonl_files(rows, vdir)
+            vcounts = write_jsonl_files(vrows, vdir)
         else:
-            vcounts = {n: len(r) for n, r in rows.items()}
+            vcounts = {n: len(r) for n, r in vrows.items()}
         m = dict(manifest_by_video.get(vid) or {"video_id": vid})
-        m.update({"counts": vcounts, "split": next((r.get("split") for rs in rows.values() for r in rs if r.get("split")), None), "reannotated": True, "files": {k: f"per_video/{vid}/{k}.jsonl" for k in vcounts}})
+        m.update({"counts": vcounts, "split": next((r.get("split") for rs in vrows.values() for r in rs if r.get("split")), None), "reannotated": True, "files": {k: f"per_video/{vid}/{k}.jsonl" for k in vcounts}})
         if (out / "per_video" / vid).exists():
             write_json_atomic(vdir / "manifest.json", m)
         new_manifests.append(m)
@@ -284,6 +284,12 @@ def hub_token(config: PipelineConfig) -> str | None:
     return os.environ.get(config.upload.token_env or "HF_TOKEN") or None
 
 
+def _repo_id(config: PipelineConfig) -> str:
+    if not config.upload.repo_id:
+        raise ValueError("upload.repo_id is not set")
+    return config.upload.repo_id
+
+
 def list_hub_shards(config: PipelineConfig, token: str | None) -> list[str]:
     """Shard folders (`.../shard_NNNN`) present in the dataset repo."""
     from huggingface_hub import HfApi
@@ -292,7 +298,7 @@ def list_hub_shards(config: PipelineConfig, token: str | None) -> list[str]:
     api = HfApi(token=token)
     prefix = cfg.path_in_repo.strip("/") if cfg.path_in_repo else ""
     out: list[str] = []
-    for item in api.list_repo_tree(cfg.repo_id, path_in_repo=prefix or None, repo_type=cfg.repo_type, recursive=False):
+    for item in api.list_repo_tree(_repo_id(config), path_in_repo=prefix or None, repo_type=cfg.repo_type, recursive=False):
         name = Path(item.path).name
         if name.startswith("shard_") and item.__class__.__name__ == "RepoFolder":
             out.append(item.path)
@@ -318,7 +324,7 @@ def download_shard(config: PipelineConfig, path_in_repo: str, dest: Path, token:
     else:
         allow = [f"{path_in_repo}/*.jsonl", f"{path_in_repo}/*.parquet", f"{path_in_repo}/*.json", f"{path_in_repo}/per_video/*/*"]
         ignore = [f"{path_in_repo}/frames/*", f"{path_in_repo}/clips/*"]
-    snapshot_download(repo_id=cfg.repo_id, repo_type=cfg.repo_type, token=token, local_dir=str(dest), allow_patterns=allow, ignore_patterns=ignore)
+    snapshot_download(repo_id=_repo_id(config), repo_type=cfg.repo_type, token=token, local_dir=str(dest), allow_patterns=allow, ignore_patterns=ignore)
     local = dest / path_in_repo
     if not local.exists():
         raise FileNotFoundError(f"{path_in_repo} was not found in {cfg.repo_id}")
@@ -373,7 +379,7 @@ def push_shard(
         msg = f"{base} ({n}/{len(chunks)})" if len(chunks) > 1 else base
         log.info("pushing %s: commit %d/%d, %d file(s)", path_in_repo, n, len(chunks), len(ops))
         info = retry_call(
-            lambda ops=ops, msg=msg: api.create_commit(repo_id=cfg.repo_id, repo_type=cfg.repo_type, operations=ops, commit_message=msg),
+            lambda ops=ops, msg=msg: api.create_commit(repo_id=_repo_id(config), repo_type=cfg.repo_type, operations=ops, commit_message=msg),  # type: ignore[misc]  # default-arg lambda binds the loop values
             retries=int(retries), base_delay=5.0, max_delay=120.0, label=f"commit {n}/{len(chunks)} of {path_in_repo}",
         )
         last = str(getattr(info, "commit_url", None) or info)
@@ -389,15 +395,15 @@ def update_dataset_card(config: PipelineConfig, token: str) -> str:
 
     cfg = config.upload
     api = HfApi(token=token)
-    if api.file_exists(cfg.repo_id, "README.md", repo_type=cfg.repo_type):
-        current = Path(api.hf_hub_download(cfg.repo_id, "README.md", repo_type=cfg.repo_type)).read_text(encoding="utf-8")
+    if api.file_exists(_repo_id(config), "README.md", repo_type=cfg.repo_type):
+        current = Path(api.hf_hub_download(_repo_id(config), "README.md", repo_type=cfg.repo_type)).read_text(encoding="utf-8")
         body = merge_card_configs(current, cfg)
         if body == current:
             return ""
     else:
         body = dataset_card(cfg, config)
     info = api.upload_file(
-        path_or_fileobj=body.encode("utf-8"), path_in_repo="README.md", repo_id=cfg.repo_id,
+        path_or_fileobj=body.encode("utf-8"), path_in_repo="README.md", repo_id=_repo_id(config),
         repo_type=cfg.repo_type, commit_message="Update dataset card: loader configs point at the per-type Parquet files",
     )
     return str(getattr(info, "commit_url", None) or info)

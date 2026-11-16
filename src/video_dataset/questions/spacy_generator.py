@@ -264,7 +264,7 @@ class SpacyQAGenerator:
                 long_kept.append(c)
         n_long = min(len(long_kept), max(1, int(round(target * LONG_RANGE_SHARE)))) if long_kept else 0
         usage: dict[str, int] = {}  # questions per event, shared with the per-event loop below (spacy_max_per_event)
-        selected_long = []
+        selected_long: list[Any] = []
         for c in long_kept:
             if len(selected_long) >= n_long:
                 break
@@ -286,12 +286,12 @@ class SpacyQAGenerator:
                 continue
             rng.shuffle(cands)
             kept = usage.get(e.event_id, 0)
-            for c in cands:
-                key = f"{c.type}|{normalize_text(c.question)}"
+            for sc in cands:
+                key = f"{sc.type}|{normalize_text(sc.question)}"
                 if key in seen:
                     continue
                 seen.add(key)
-                chosen.append((e, c))
+                chosen.append((e, sc))
                 kept += 1
                 if kept >= per_event:
                     break
@@ -301,30 +301,30 @@ class SpacyQAGenerator:
         chosen.sort(key=lambda ec: (ec[0].start_time, ec[0].event_id, str(ec[1].type)))
 
         records: list[QARecord] = []
-        for e, c in chosen:
+        for e, sc in chosen:
             conf, src = _conf([e])
             records.append(
                 QARecord(
                     question_id=make_qa_id(video_id, 0),
                     video_id=video_id,
-                    type=c.type,
-                    question=c.question,
-                    answer=c.answer,
+                    type=sc.type,
+                    question=sc.question,
+                    answer=sc.answer,
                     evidence=Evidence(
                         start_time=round(max(0.0, e.start_time), 3),
                         end_time=round(min(duration, max(e.end_time, e.start_time)), 3),
-                        timestamps=[round(t, 3) for t in (c.timestamps or [e.start_time])],
+                        timestamps=[round(t, 3) for t in (sc.timestamps or [e.start_time])],
                         scene_ids=list(e.scene_ids),
                         event_ids=[e.event_id],
                         frame_ids=list(e.frame_ids[:16]),
                         transcript_segment_ids=list(e.source_ids) if e.event_type == EventType.SPEECH else [],
                         ocr_track_ids=list(e.source_ids) if e.event_type == EventType.TEXT_ON_SCREEN else [],
                     ),
-                    difficulty=c.difficulty,
+                    difficulty=sc.difficulty,
                     confidence=conf,
                     confidence_source=src,
                     generator=self.name,
-                    template_id=c.template_id,
+                    template_id=sc.template_id,
                     is_long_range=False,
                 )
             )

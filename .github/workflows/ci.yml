@@ -39,8 +39,10 @@ jobs:
           cache: pip
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-      - name: Install package (tests use mock ASR, heuristic vision, RapidOCR)
-        run: pip install -e ".[dev,ocr]"
+      - name: Install package (tests use mock ASR, heuristic vision, RapidOCR, spaCy, a fake Hub)
+        run: |
+          pip install -e ".[dev,ocr,upload,qa-spacy]"
+          python -m spacy download en_core_web_sm
       - name: Run tests with coverage
         run: python -m pytest -q -p no:cacheprovider --cov --cov-report=term --cov-report=xml --cov-report=html --junitxml=junit.xml
       - name: Upload coverage report

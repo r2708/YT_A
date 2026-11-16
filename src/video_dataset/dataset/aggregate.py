@@ -427,8 +427,8 @@ def fill_lighting_and_color(records: dict[str, list[dict[str, Any]]], video_info
     (null); colour space / transfer / primaries / range come from the container when declared."""
     n = 0
     for rec in records.get("scenes", []):
-        m = rec.get("measurements") if isinstance(rec.get("measurements"), dict) else {}
-        env = rec.get("environment") if isinstance(rec.get("environment"), dict) else {}
+        m: dict[str, Any] = rec["measurements"] if isinstance(rec.get("measurements"), dict) else {}
+        env: dict[str, Any] = rec["environment"] if isinstance(rec.get("environment"), dict) else {}
         media = (video_info.get(str(rec.get("video_id")), {}) or {}).get("media") or {}
         tod = env.get("time_of_day")
         rec["lighting"] = {
@@ -511,7 +511,7 @@ def qa_rejection_analysis(records: dict[str, list[dict[str, Any]]]) -> dict[str,
 def append_review_history(final_dir: Path, release_id: str, stats: dict[str, Any]) -> None:
     """One line per export in ``review_history.jsonl``: the review / accepted share per record type,
     so a repair can be shown to lower the review rate instead of asserting it."""
-    row = {"release_id": release_id, "at": stats.get("generated_at"), "policy_version": stats.get("policy_version"), "schema_version": stats.get("schema_version"), "review_rate": {}, "accepted_rate": {}}
+    row: dict[str, Any] = {"release_id": release_id, "at": stats.get("generated_at"), "policy_version": stats.get("policy_version"), "schema_version": stats.get("schema_version"), "review_rate": {}, "accepted_rate": {}}
     for name, rep in (stats.get("validation_report") or {}).items():
         pct = rep.get("status_pct") or {}
         row["review_rate"][name] = pct.get("review")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -54,11 +55,11 @@ def check_frame_sequence(frames: list[Any], start: float, end: float, tol: float
     idx = [f.frame_index for f in ordered]
     if len(set(idx)) != len(idx):
         problems.append("duplicate frame indices")
-    if any(b <= a for a, b in zip(idx, idx[1:])):
+    if any(b <= a for a, b in pairwise(idx)):
         problems.append("frame indices not increasing with time")
     if len(ordered) >= 2 and not (max_frames and len(ordered) >= max_frames):
         span = max(1e-6, end - start)
-        gaps = [b.timestamp - a.timestamp for a, b in zip(ordered, ordered[1:])]
+        gaps = [b.timestamp - a.timestamp for a, b in pairwise(ordered)]
         limit = max(min_gap_seconds, 3.0 * span / len(ordered))
         worst = max(gaps)
         if worst > limit:

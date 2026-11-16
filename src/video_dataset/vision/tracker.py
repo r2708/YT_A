@@ -86,8 +86,8 @@ class IoUTracker:
                 pairs = list(zip(rows.tolist(), cols.tolist()))
             except Exception:  # pragma: no cover - scipy missing: greedy fallback
                 pairs = []
-                for i in np.argsort(cost, axis=None):
-                    r, c = divmod(int(i), cost.shape[1])
+                for flat in np.argsort(cost, axis=None):
+                    r, c = divmod(int(flat), cost.shape[1])
                     if r not in {p[0] for p in pairs} and c not in {p[1] for p in pairs}:
                         pairs.append((r, c))
             for r, c in pairs:

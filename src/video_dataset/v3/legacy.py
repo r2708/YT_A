@@ -152,12 +152,12 @@ def build_source_index(root: Path) -> list[dict[str, Any]]:
                         counts[v["video_id"]][k] = int(n or 0)
                     rows[v["video_id"]]["split"] = v.get("split") or rows[v["video_id"]]["split"]
     for clip in load_records(root, "clips"):
-        vid = clip.get("video_id")
-        if vid not in rows:  # a clip without provenance: keep it visible, it can never be approved without a URL
-            rows[vid] = {"source_video_id": vid, "source_url": None, "youtube_id": None, "channel": None, "title": None, "duration": None, "license_status": None,
-                         "legacy_rights_status": (clip.get("rights") or {}).get("status"), "source_sha256": None, "source_group_id": clip.get("source_group_id") or vid,
+        cvid: Any = clip.get("video_id")
+        if cvid not in rows:  # a clip without provenance: keep it visible, it can never be approved without a URL
+            rows[cvid] = {"source_video_id": cvid, "source_url": None, "youtube_id": None, "channel": None, "title": None, "duration": None, "license_status": None,
+                         "legacy_rights_status": (clip.get("rights") or {}).get("status"), "source_sha256": None, "source_group_id": clip.get("source_group_id") or cvid,
                          "split": None, "clip_ids": [], "counts": {}}
-        row = rows[vid]
+        row = rows[cvid]
         row["clip_ids"].append(clip.get("record_id"))
         row["split"] = row["split"] or clip.get("split")
         row["source_group_id"] = clip.get("source_group_id") or row["source_group_id"]
@@ -188,7 +188,7 @@ def build_inventory(config: Any) -> dict[str, Any]:
     for f in files:
         for v, n in (f.get("schema_versions") or {}).items():
             versions[v] += n
-    inventory = {
+    inventory: dict[str, Any] = {
         "generated_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "source": (config.v3.legacy.source or "local").lower(),
         "revision": revision.splitlines(),

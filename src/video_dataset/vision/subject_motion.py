@@ -262,7 +262,8 @@ def apply_subject_motion(analysis: SceneAnalysis, sm: SubjectMotion | None) -> N
     if sm is None:
         return
     analysis.subject_motion = sm
-    cam_speed = float(np.hypot(*(list(sm.camera_velocity) + [0.0, 0.0])[:2]))
+    cam_vx, cam_vy = (list(sm.camera_velocity) + [0.0, 0.0])[:2]
+    cam_speed = float(np.hypot(cam_vx, cam_vy))
     if sm.label == "tracked_by_camera" and cam_speed >= EPS and analysis.camera.movement in TRACKABLE and analysis.camera.movement not in TRACKING_SET:
         confs = [c for c in (analysis.camera.confidence, sm.confidence) if c is not None]
         previous = str(analysis.camera.movement)

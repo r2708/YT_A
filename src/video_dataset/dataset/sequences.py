@@ -23,7 +23,7 @@ _STATUS_ORDER = {ValidationStatus.ACCEPTED.value: 0, ValidationStatus.REVIEW.val
 
 
 def _env(rec: dict[str, Any], key: str) -> str | None:
-    env = rec.get("environment") if isinstance(rec.get("environment"), dict) else {}
+    env: dict[str, Any] = rec["environment"] if isinstance(rec.get("environment"), dict) else {}
     v = env.get(key)
     return str(v).strip().lower() if v and str(v).strip().lower() != "unknown" else None
 
@@ -50,16 +50,16 @@ def _compatible(prev: dict[str, Any], cur: dict[str, Any], cfg: SequenceConfig) 
             if a and b:
                 reasons.append(f"same_{key}")
     if cfg.require_shared_subject:
-        a, b = _objects(prev), _objects(cur)
-        if a and b:
-            if not (a & b):
+        oa, ob = _objects(prev), _objects(cur)
+        if oa and ob:
+            if not (oa & ob):
                 return []
             reasons.append("shared_subject")
     return reasons or ["consecutive_cut"]
 
 
 def _camera_label(rec: dict[str, Any]) -> str:
-    cam = rec.get("camera") if isinstance(rec.get("camera"), dict) else {}
+    cam: dict[str, Any] = rec["camera"] if isinstance(rec.get("camera"), dict) else {}
     fam = cam.get("camera_movement") or "unknown"
     d = cam.get("movement_direction")
     return f"{fam}_{d}" if d else str(fam)
@@ -81,7 +81,7 @@ def _min_quality(shots: list[dict[str, Any]]) -> dict[str, Any] | None:
     if any(o is None for o in overalls):
         return None
     comps = sorted({c for s in shots for c in ((s.get("quality") or {}).get("components_used") or [])})
-    return {"grounding": None, "temporal_accuracy": None, "description_quality": None, "overall": round(min(float(o) for o in overalls), 4), "components_used": comps, "notes": ["minimum over the joined shots"]}
+    return {"grounding": None, "temporal_accuracy": None, "description_quality": None, "overall": round(min(float(o) for o in overalls if o is not None), 4), "components_used": comps, "notes": ["minimum over the joined shots"]}
 
 
 def sequence_prompt(shots: list[dict[str, Any]], subjects: list[str], setting: str | None, time_of_day: str | None, duration: float) -> tuple[str | None, list[str]]:
@@ -113,7 +113,7 @@ def _emit(video_id: str, shots: list[dict[str, Any]], reasons: list[str], clip_i
     tod = tods.pop() if len(tods) == 1 else None
     prompt, shot_prompts = sequence_prompt(shots, subjects, setting, tod, duration)
     confs = [s.get("confidence") for s in shots]
-    conf = round(min(float(c) for c in confs), 3) if confs and all(c is not None for c in confs) else None
+    conf = round(min(float(c) for c in confs if c is not None), 3) if confs and all(c is not None for c in confs) else None
     status = _worst_status(shots)
     seq_id = f"seq_{n:03d}"
     rec = {
@@ -172,7 +172,7 @@ def build_sequences(records: dict[str, list[dict[str, Any]]], cfg: SequenceConfi
         reasons: list[str] = []
         n = 0
 
-        def flush() -> None:
+        def flush(vid: str = vid, clips: dict[str, str] = clips) -> None:
             nonlocal run, reasons, n
             if len(run) >= 2 and float(run[-1]["end_time"]) - float(run[0]["start_time"]) >= float(cfg.min_duration):
                 n += 1

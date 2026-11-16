@@ -153,7 +153,7 @@ def description_checks(rec: dict[str, Any], idx: _Index, gap_tol: float = 0.5) -
     sids = [str(s) for s in (rec.get("scene_ids") or [])]
     checks: dict[str, str] = {}
     checks["scenes_exist"] = _state(bool(sids) and all(s in scenes for s in sids))
-    ev = rec.get("evidence") if isinstance(rec.get("evidence"), dict) else {}
+    ev: dict[str, Any] = rec["evidence"] if isinstance(rec.get("evidence"), dict) else {}
     ok = all(s in scenes for s in (ev.get("scene_ids") or [])) and all(c in idx.clips.get(vid, {}) for c in (ev.get("clip_ids") or [])) and all(f in idx.frames.get(vid, {}) for f in (ev.get("frame_ids") or []))
     checks["evidence_resolves"] = _state(ok) if ev else NOT_RUN
     s, e = _span(rec)
@@ -171,7 +171,7 @@ def description_checks(rec: dict[str, Any], idx: _Index, gap_tol: float = 0.5) -
 
 def qa_evidence_check(rec: dict[str, Any], idx: _Index, tol: float = 0.05) -> str:
     vid = str(rec.get("video_id"))
-    ev = rec.get("evidence") if isinstance(rec.get("evidence"), dict) else {}
+    ev: dict[str, Any] = rec["evidence"] if isinstance(rec.get("evidence"), dict) else {}
     ids = [str(x) for x in (ev.get("event_ids") or [])]
     if not ids:
         return NA

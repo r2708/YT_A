@@ -84,6 +84,7 @@ def _fake(monkeypatch, system: str, cuda: bool, mps: bool) -> None:
 
 
 def test_device_auto_detection_per_os(clean_device):
+    pytest.importorskip("torch")  # device selection asks torch what is available
     _fake(clean_device, "Windows", cuda=True, mps=False)
     assert device_mod.resolve_device("auto") == "cuda"
     _fake(clean_device, "Windows", cuda=False, mps=False)
@@ -97,6 +98,7 @@ def test_device_auto_detection_per_os(clean_device):
 
 
 def test_device_overrides_and_fallback(clean_device):
+    pytest.importorskip("torch")  # device selection asks torch what is available
     _fake(clean_device, "Windows", cuda=False, mps=False)
     assert device_mod.resolve_device("cuda") == "cpu"  # unavailable accelerator: warning + CPU
     info = device_mod.runtime_info("cuda")
@@ -129,6 +131,15 @@ def _clip(vid: str, n: int, start: float, end: float, status: str = "accepted", 
         "generation_prompt": prompt if prompt is not None else f"A {end - start:.0f}-second wide shot, static camera.", "prompt_variants": ["Wide static shot."],
         "description": "A shot.", "camera": {"shot_type": "wide", "camera_angle": "eye_level", "movement": "static", "speed": None}, "validation": {"status": status},
     }
+
+
+def _spacy_ready() -> bool:
+    try:
+        import spacy
+
+        return bool(spacy.util.is_package("en_core_web_sm"))
+    except Exception:
+        return False
 
 
 @pytest.fixture()
@@ -243,6 +254,7 @@ def test_inventory_and_rights_gate(v3_env):
 
 
 # ----------------------------------------------------------------------------- end to end
+@pytest.mark.skipif(not _spacy_ready(), reason="spaCy en_core_web_sm not installed (the prompt check needs it)")
 def test_v3_end_to_end(v3_env, tmp_path: Path):
     cfg, _final, video = v3_env
     _prepare(cfg, video)

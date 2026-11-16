@@ -67,7 +67,7 @@ class UploadState:
 
     @property
     def uploaded_videos(self) -> set[str]:
-        return {v for s in self.shards for v in (s.get("videos") if isinstance(s.get("videos"), list) else [])}
+        return {v for s in self.shards for v in (s["videos"] if isinstance(s.get("videos"), list) else [])}
 
     @property
     def uploaded_video_count(self) -> int:
@@ -229,7 +229,7 @@ def write_media_metadata(final_dir: Path, staging: Path, videos: set[str]) -> in
                 continue  # not under data/<sub>/: the loader could not find it anyway
             row: dict[str, Any] = {"file_name": p[len(sub) + 1:]}
             row.update({k: rec.get(k) for k in keys})
-            cam = rec.get("camera") if isinstance(rec.get("camera"), dict) else {}
+            cam: dict[str, Any] = rec["camera"] if isinstance(rec.get("camera"), dict) else {}
             row.update({k: cam.get(k) for k in _CAMERA_META})
             rows.append(row)
         if rows:

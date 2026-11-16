@@ -552,7 +552,7 @@ def reannotate(
     t = Table(title="re-annotated shards")
     for col in ("shard", "videos", "records", "splits", "scene tiers", "QA tiers", "hard negatives", "cinematic scenes", "output"):
         t.add_column(col)
-    for local, path_in_repo in targets:
+    for local, repo_path in targets:
         out_dir = (Path(output) / local.name) if output else None
         summary = reannotate_shard(local, cfg, out_dir, rebuild_negatives=not no_negatives)
         t.add_row(
@@ -560,11 +560,11 @@ def reannotate(
             json.dumps(summary["qa_tiers"]), json.dumps(summary["hard_negatives"]), str(summary["cinematic"].get("cinematic_scenes", 0)), summary["output"],
         )
         if push:
-            if not path_in_repo:
+            if not repo_path:
                 console.print(f"[yellow]{local}: not a shard_NNNN folder, cannot tell where it lives on the Hub - skipped push[/yellow]")
                 continue
-            url = push_shard(cfg, Path(summary["output"]), path_in_repo, token or "")
-            console.print(f"pushed {path_in_repo}: {url}")
+            url = push_shard(cfg, Path(summary["output"]), repo_path, token or "")
+            console.print(f"pushed {repo_path}: {url}")
     console.print(t)
     if update_card:
         if not token:

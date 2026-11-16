@@ -26,7 +26,13 @@ from video_dataset.schemas.common import ConfidenceSource
 from video_dataset.schemas.dataset import SceneRecord, SequenceRecord
 from video_dataset.schemas.scene import Clip, Frame, ScanSample, SceneScan
 from video_dataset.schemas.video import license_status
-from video_dataset.schemas.vision import CameraAnnotation, CameraMovement, Measurements, SceneAnalysis, SubjectMotion
+from video_dataset.schemas.vision import (
+    CameraAnnotation,
+    CameraMovement,
+    Measurements,
+    SceneAnalysis,
+    SubjectMotion,
+)
 from video_dataset.utils.imagehash import dhash, hamming, jaccard_hashes
 from video_dataset.validation.checks import check_clips, check_frame_sequence
 from video_dataset.validation.consistency import check_scene_consistency, text_movements
