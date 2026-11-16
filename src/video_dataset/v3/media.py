@@ -79,7 +79,12 @@ def acquire(config: Any, entry: dict[str, Any], row: dict[str, Any], job_dir: Pa
     result = downloader.fetch(item, vid, src_dir)
     if result.video_path is None or result.status in (DownloadStatus.FAILED, DownloadStatus.UNAVAILABLE, DownloadStatus.REJECTED):
         raise AcquisitionError(f"{result.status}: {result.error}", retryable=result.status == DownloadStatus.FAILED)
-    return Path(result.video_path), "download"
+    path = Path(result.video_path)
+    if config.preprocess.compress:  # optional lossy re-encode of the download (preprocess.compress)
+        from video_dataset.preprocessing.normalize import compress_source
+
+        path, _ = compress_source(path, config.preprocess, config.project.ffmpeg_path)
+    return path, "download"
 
 
 def probe(path: Path, ffprobe_path: str | None = None) -> dict[str, Any]:

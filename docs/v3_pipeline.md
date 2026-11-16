@@ -20,6 +20,22 @@ The download cap, the canonical transcode, re-encoded clips and the V3 training 
 native size in its own bucket (`native_480_576`, `lowres_360`) and never labelled as the target;
 below `experimental_min` it is excluded.
 
+## Compressing downloads (optional)
+
+Off by default. Turn it on to re-encode every downloaded video and save disk:
+
+```yaml
+preprocess:
+  compress: true      # true = on, false = off
+  compress_crf: 26    # 23 light, 26 medium, 28 heavy (visible loss)
+```
+
+One-off: `--set preprocess.compress=true`. The original download is replaced by the smaller
+`source.mp4`; if the re-encode would not be smaller, the original is kept. Resolution, duration
+and frame count are unchanged. It is lossy, and V3 clips are then cut from the compressed file,
+so for training data leave it off unless disk space is the constraint. Applies to new downloads
+in both the main pipeline and `v3 run`; files already on disk are not touched.
+
 ## Workflow
 
 ```bash
@@ -76,10 +92,12 @@ metadata-only and are cleaned as before.
 | PySceneDetect | shot boundaries, and the V3 single-shot check on every extracted clip |
 | spaCy | question generation (`qa.generator: both`), caption / question text checks, the V3 prompt check |
 
-Whisper (speech-to-text) and OCR stay on through `project.no_models_except: [transcription, ocr]`, so
-records keep their transcript and on-screen text. Object detection (YOLO), CLIP and any VLM / LLM are
-off, so records carry no detected object classes or aesthetic score; a run refuses to start if one of
-them is switched on while `no_models` is true. spaCy's small English
+Three small local models stay on through
+`project.no_models_except: [transcription, ocr, "vision.provider=cv_models"]`: Whisper (transcript),
+OCR (on-screen text) and YOLO + CLIP (`vision.provider: cv_models`: object classes, aesthetic score,
+caption / frame alignment). None needs an API key. Any VLM / LLM is off; a run refuses to start if
+one is switched on while `no_models` is true. To run with no vision models, set
+`vision.provider: heuristic`. spaCy's small English
 pipeline (`en_core_web_sm`) is a statistical tagger / parser; it is the one learned component.
 
 ## Device

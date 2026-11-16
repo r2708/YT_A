@@ -57,7 +57,7 @@ class AssetCache:
             if p.name.endswith(".part") or ".tmp" in p.name:
                 p.unlink(missing_ok=True)
                 continue
-            files.append((p.stat().st_atime, str(p.relative_to(self.root)), p.stat().st_size))
+            files.append((p.stat().st_atime, p.relative_to(self.root).as_posix(), p.stat().st_size))
         for _atime, rel, size in sorted(files):
             self._lru[rel] = size
         shutil.rmtree(self.root / ".incoming", ignore_errors=True)

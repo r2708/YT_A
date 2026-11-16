@@ -457,7 +457,7 @@ def test_review_queue_labels_and_calibration(tmp_path: Path):
 
 # ------------------------------------------------------------------ issue 21: coverage
 def test_stage_coverage_distinguishes_not_run_from_empty(tmp_path: Path):
-    cfg = _cfg(tmp_path, **{"transcription.provider": "none", "ocr.provider": "none"})
+    cfg = _cfg(tmp_path, **{"transcription.provider": "none", "ocr.provider": "none", "vision.provider": "heuristic"})
     db = StateDB(cfg.db_path)
     db.upsert_video("vid_x", "u")
     db.finish_stage("vid_x", Stage.OCR, status=StageStatus.SKIPPED)

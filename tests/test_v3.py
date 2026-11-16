@@ -387,12 +387,13 @@ def test_default_config_uses_no_models():
     from video_dataset.config import assert_no_models, model_providers_in_use
 
     cfg = load_config()
-    assert cfg.project.no_models and cfg.project.no_models_except == ["transcription", "ocr"]
-    assert len(model_providers_in_use(cfg)) == 2  # Whisper + OCR are the only models, both allowed explicitly
-    assert (cfg.transcription.provider, cfg.ocr.provider, cfg.vision.provider, cfg.llm.provider) == ("faster_whisper", "rapidocr", "heuristic", "none")
+    assert cfg.project.no_models and cfg.project.no_models_except == ["transcription", "ocr", "vision.provider=cv_models"]
+    assert len(model_providers_in_use(cfg)) == 3  # Whisper, OCR and YOLO + CLIP are the only models, all allowed explicitly
+    assert (cfg.transcription.provider, cfg.ocr.provider, cfg.vision.provider, cfg.llm.provider) == ("faster_whisper", "rapidocr", "cv_models", "none")
+    assert cfg.vision.aesthetic and cfg.validation.clip_alignment == "auto"
     assert cfg.scene_detection.detector == "content" and cfg.qa.generator == "both" and cfg.validation.nlp_model == "auto"  # PySceneDetect + spaCy
     assert_no_models(cfg)
-    for key, value in (("project.no_models_except", "[ocr]"), ("vision.provider", "cv_models"), ("vision.enrichers", "[clip]"), ("llm.provider", "anthropic")):
+    for key, value in (("project.no_models_except", "[ocr]"), ("vision.provider", "hf"), ("vision.provider", "anthropic"), ("vision.enrichers", "[clip]"), ("llm.provider", "anthropic")):
         with pytest.raises(ValueError, match="no_models"):
             assert_no_models(load_config(None, {key: value}))
     assert_no_models(load_config(None, {"vision.provider": "cv_models", "project.no_models": "false"}))  # an explicit opt-out still works

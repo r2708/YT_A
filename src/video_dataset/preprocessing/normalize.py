@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -30,6 +31,58 @@ def _opencv_can_decode(path: Path) -> bool:
         return False
 
 
+COMPRESSION_MARKER = "compression.json"
+
+
+def compress_source(source: Path, config: PreprocessConfig, ffmpeg_path: str | None = None) -> tuple[Path, bool]:
+    """Re-encode a downloaded source in place (H.264 at ``compress_crf``) when ``preprocess.compress`` is on.
+
+    Returns (path, compressed). The original is replaced by ``source.mp4`` only when the result is
+    smaller; otherwise it is kept untouched. A marker next to the file records the outcome so a
+    re-run never compresses the same file twice."""
+    if not config.compress:
+        return source, False
+    marker = source.parent / COMPRESSION_MARKER
+    size = source.stat().st_size
+    if marker.exists():
+        try:
+            done = json.loads(marker.read_text())
+        except (OSError, ValueError):
+            done = {}
+        if done.get("size_bytes") == size and done.get("file") == source.name:
+            return source, bool(done.get("compressed"))
+
+    crf, preset = int(config.compress_crf), str(config.compress_preset)
+    tmp = source.parent / "compressing.tmp.mp4"  # not matched by the `source.*` globs
+    log.info("compressing %s (crf=%d preset=%s, %.1f MB)", source.name, crf, preset, size / 1e6)
+    run_ffmpeg(
+        [
+            "-i", str(source),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p",
+            "-vf", f"scale=-2:'min(ih,{int(config.max_transcode_height or 720)})'",
+            "-c:a", "aac", "-b:a", str(config.compress_audio_bitrate),
+            "-movflags", "+faststart",
+            str(tmp),
+        ],
+        ffmpeg_path=ffmpeg_path,
+    )
+    new_size = tmp.stat().st_size
+    record = {"crf": crf, "preset": preset, "original_file": source.name, "original_bytes": size, "encoded_bytes": new_size}
+    if new_size >= size or not _opencv_can_decode(tmp):
+        tmp.unlink(missing_ok=True)
+        log.info("compression kept the original %s (result %.1f MB was not smaller or not decodable)", source.name, new_size / 1e6)
+        marker.write_text(json.dumps({**record, "compressed": False, "file": source.name, "size_bytes": size}))
+        return source, False
+    final = source.with_name("source.mp4") if source.stem == "source" else source.with_suffix(".mp4")
+    if final != source:
+        source.unlink()
+    os.replace(tmp, final)
+    marker.write_text(json.dumps({**record, "compressed": True, "file": final.name, "size_bytes": new_size}))
+    log.info("compressed %s: %.1f MB -> %.1f MB (%.0f%% smaller)", final.name, size / 1e6, new_size / 1e6, 100 * (1 - new_size / size))
+    return final, True
+
+
 def ensure_canonical_video(
     source: Path,
     dest: Path,
@@ -42,8 +95,9 @@ def ensure_canonical_video(
     if dest.exists() and dest.stat().st_size > 0 and _opencv_can_decode(dest):
         return dest, False
 
-    container_ok = (info.container or "").lower() in {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"} or source.suffix.lower() == ".mp4"
-    codec_ok = (info.video_codec or "").lower() in {c.lower() for c in config.decodable_codecs}
+    source, compressed = compress_source(source, config, ffmpeg_path)
+    container_ok = compressed or (info.container or "").lower() in {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"} or source.suffix.lower() == ".mp4"
+    codec_ok = compressed or (info.video_codec or "").lower() in {c.lower() for c in config.decodable_codecs}
     needs_transcode = config.transcode_if_needed and (not container_ok or not codec_ok or not _opencv_can_decode(source))
 
     if not needs_transcode:
@@ -54,7 +108,7 @@ def ensure_canonical_video(
         except OSError:
             shutil.copy2(source, dest)
         if _opencv_can_decode(dest):
-            return dest, False
+            return dest, compressed
         if not config.transcode_if_needed:
             raise RuntimeError(f"{source} cannot be decoded by OpenCV and transcoding is disabled")
         dest.unlink(missing_ok=True)

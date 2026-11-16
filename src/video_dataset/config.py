@@ -32,7 +32,8 @@ class ProjectConfig(_Section):
     # recognition, OCR, object detection, CLIP, VLM / LLM). Only FFmpeg, OpenCV, PySceneDetect and
     # spaCy do the work. See model_providers_in_use().
     no_models: bool = False
-    # stages that may still use their model while no_models is true (transcription = Whisper, ocr = text recognition)
+    # what may still use its model while no_models is true: a stage name (transcription = Whisper, ocr = text
+    # recognition) or one exact setting such as "vision.provider=cv_models" (YOLO + CLIP, no VLM)
     no_models_except: list[str] = Field(default_factory=list)
     require_accelerator: bool = False  # true: fail instead of falling back to CPU when the requested device is missing
     seed: int = 1234
@@ -97,6 +98,11 @@ class PreprocessConfig(_Section):
     transcode_if_needed: bool = True
     decodable_codecs: list[str] = Field(default_factory=lambda: ["h264", "hevc", "vp9", "av1", "mpeg4", "vp8"])
     max_transcode_height: int | None = None  # null -> resolution.download_max / resolution.target
+    # --- optional: re-encode every downloaded video to save disk (lossy) ---
+    compress: bool = False  # true = on, false = off
+    compress_crf: int = Field(default=26, ge=0, le=51)  # higher = smaller file, lower quality (23 light, 26 medium, 28 heavy)
+    compress_preset: str = "medium"  # x264 preset: slower presets give a smaller file at the same quality
+    compress_audio_bitrate: str = "128k"
 
 
 class SceneDetectionConfig(_Section):
@@ -770,7 +776,8 @@ def model_providers_in_use(config: PipelineConfig) -> list[str]:
 def assert_no_models(config: PipelineConfig) -> None:
     if not config.project.no_models:
         return
-    allowed = tuple(f"{name}." for name in (config.project.no_models_except or []))
+    # "ocr" allows every ocr.* setting; "vision.provider=cv_models" allows exactly that one value
+    allowed = tuple(name if "=" in name else f"{name}." for name in (config.project.no_models_except or []))
     found = [f for f in model_providers_in_use(config) if not f.startswith(allowed)] if allowed else model_providers_in_use(config)
     if found:
         raise ValueError("project.no_models is true but these settings load a model: " + "; ".join(found) + ". Set them to none / heuristic / off, or set project.no_models: false.")

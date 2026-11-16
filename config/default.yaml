@@ -11,7 +11,8 @@ project:
   no_models: true          # true = no AI model except the stages listed in no_models_except: the rest of the work is
                            # done by FFmpeg, OpenCV, PySceneDetect and spaCy. A run refuses to start if any other
                            # stage is switched to a model (YOLO, CLIP, VLM / LLM, audio classifier).
-  no_models_except: [transcription, ocr]   # Whisper speech-to-text and OCR stay on; remove one here to forbid it too
+  no_models_except: [transcription, ocr, "vision.provider=cv_models"]   # Whisper, OCR and YOLO + CLIP stay on (small local
+                           # models, no API key); remove an entry to forbid it. Any VLM / LLM stays blocked.
   require_accelerator: false  # ... or fails instead when true (env REQUIRE_ACCELERATOR=true)
   seed: 1234
   ffmpeg_path: null        # null -> search PATH, then the imageio-ffmpeg bundled binary
@@ -67,6 +68,11 @@ preprocess:
   transcode_if_needed: true
   decodable_codecs: [h264, hevc, vp9, av1, mpeg4, vp8]
   max_transcode_height: null   # null -> follows resolution
+  # Re-encode every downloaded video to save disk. Lossy: the original download is replaced.
+  compress: false              # true = ON, false = OFF
+  compress_crf: 26             # 23 = light (~20-35% smaller), 26 = medium (~40-55%), 28 = heavy (~55-65%, visible loss)
+  compress_preset: medium      # x264 preset; slower = smaller file at the same quality, more CPU time
+  compress_audio_bitrate: 128k
 
 scene_detection:
   detector: content        # content | adaptive | threshold
@@ -153,7 +159,7 @@ ocr:
   workers: null            # OCR threads (one engine each); null -> pipeline.stage_workers
 
 vision:
-  provider: heuristic      # heuristic | cv_models | hf | anthropic | openai_compatible | mock
+  provider: cv_models      # heuristic | cv_models | hf | anthropic | openai_compatible | mock
   yolo_model: yolov8n.pt   # YOLO model for object detection (n/s/m/l/x)
   yolo_confidence: 0.5     # Minimum confidence threshold for detections
   yolo_max_frames: 8       # frames per scene sent to YOLO / CLIP (evenly spaced)
@@ -168,7 +174,7 @@ vision:
   use_video_input: false
   enrichers: []            # optional grounded enrichers, e.g. [clip]
   clip_model: openai/clip-vit-base-patch32
-  aesthetic: false         # LAION aesthetic predictor (linear head on the CLIP embedding, ~1..10) wherever CLIP runs
+  aesthetic: true          # LAION aesthetic predictor (linear head on the CLIP embedding, ~1..10) wherever CLIP runs
   aesthetic_weights: null  # path/URL of the .pth; null -> the head matching clip_model, downloaded once
   aesthetic_cache_dir: null  # null -> ~/.cache/video_dataset/aesthetic
   max_new_tokens: 700
@@ -254,7 +260,7 @@ validation:
   workers: null            # threads for verifier calls; null -> pipeline.stage_workers
   consistency_checks: true # contradictory annotations (static camera + tracked subject, dark label on a bright frame, ...)
   reject_contradictions: true  # true: such shots are rejected; false: sent to review
-  clip_alignment: off      # auto (when CLIP is already loaded) | on | off - caption vs frames retrieval check
+  clip_alignment: auto     # auto (when CLIP is already loaded) | on | off - caption vs frames retrieval check
   clip_alignment_text: prompt  # prompt (natural-language generation prompt of the shot) | summary (measurement summary with hex colours)
   clip_alignment_min_rank_fraction: 0.75 # the shot's own caption must rank in the top three quarters of the video's captions ...
   clip_alignment_min_margin: 0.05        # ... unless the best caption beats it by less than this cosine margin (noise)

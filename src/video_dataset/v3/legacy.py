@@ -85,7 +85,7 @@ def _roots(root: Path) -> list[Path]:
 
 
 def _file_entry(path: Path, root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    rel = str(path.relative_to(root))
+    rel = path.relative_to(root).as_posix()  # forward slashes on every OS
     entry: dict[str, Any] = {"path": rel, "size_bytes": path.stat().st_size, "sha256": file_sha256(path), "format": path.suffix.lstrip("."), "rows": None, "schema_versions": {}}
     schema: dict[str, Any] = {"path": rel, "columns": []}
     if path.suffix == ".jsonl":
