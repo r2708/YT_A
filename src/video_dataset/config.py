@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_DIR = PROJECT_ROOT / "config"
@@ -27,15 +27,35 @@ class ProjectConfig(_Section):
     data_dir: str = "data"
     db_path: str | None = None  # default: <data_dir>/state.db
     log_level: str = "INFO"
-    device: str = "auto"  # auto | cuda | mps | cpu
+    device: str = "auto"  # auto | cuda | mps | cpu (env VIDEO_PIPELINE_DEVICE overrides; see utils/device.py)
+    # true: the run refuses to start when any stage is configured with a learned model (speech
+    # recognition, OCR, object detection, CLIP, VLM / LLM). Only FFmpeg, OpenCV, PySceneDetect and
+    # spaCy do the work. See model_providers_in_use().
+    no_models: bool = False
+    # stages that may still use their model while no_models is true (transcription = Whisper, ocr = text recognition)
+    no_models_except: list[str] = Field(default_factory=list)
+    require_accelerator: bool = False  # true: fail instead of falling back to CPU when the requested device is missing
     seed: int = 1234
     ffmpeg_path: str | None = None
     ffprobe_path: str | None = None
 
 
+class ResolutionConfig(_Section):
+    """THE resolution knob. ``target`` is the preferred short edge (720 = 720p) of everything the
+    pipeline keeps: the download cap, the canonical transcode, re-encoded clips and the V3 training
+    clips all follow it unless their own key is set explicitly. Sources below ``target`` are never
+    upscaled; they are kept native and labelled with the bucket they fall in."""
+
+    target: int = 720  # 2160 | 1440 | 1080 | 720 | 480 | 360 ... (short edge, pixels)
+    download_max: int | None = None  # yt-dlp height cap; null -> target (set higher to download better and downscale)
+    native_min: int = 480  # below target but >= this: kept at native size, bucket native_480_576 (primary training)
+    experimental_min: int = 360  # >= this: bucket lowres_360, kept out of primary training; below -> excluded_lowres
+    allow_upscale: bool = False  # true: sources below target are upscaled and labelled upscaled=true (separate variant)
+
+
 class DownloadConfig(_Section):
     provider: str = "yt_dlp"
-    max_resolution: int = 1080
+    max_resolution: int | None = None  # null -> resolution.download_max / resolution.target
     format: str = "mp4"
     cookies_file: str | None = None
     # Browser to read cookies from, yt-dlp style: "chrome", "chrome:Profile 1", "firefox", "edge", ...
@@ -76,7 +96,7 @@ class PreprocessConfig(_Section):
     audio_channels: int = 1
     transcode_if_needed: bool = True
     decodable_codecs: list[str] = Field(default_factory=lambda: ["h264", "hevc", "vp9", "av1", "mpeg4", "vp8"])
-    max_transcode_height: int = 1080
+    max_transcode_height: int | None = None  # null -> resolution.download_max / resolution.target
 
 
 class SceneDetectionConfig(_Section):
@@ -119,7 +139,7 @@ class FrameSamplingConfig(_Section):
     # libx264: always re-encode (exact, slower) | copy: keyframe-aligned only (fast, may include neighbours)
     clip_codec: str = "auto"
     clip_tolerance_seconds: float = 0.25
-    clip_max_height: int = 720  # re-encoded clips are downscaled to this height
+    clip_max_height: int | None = None  # re-encoded clips are downscaled to this height; null -> resolution.target
     workers: int | None = None  # threads for frame extraction + clip cutting; null -> pipeline.stage_workers
     # Duplicate frames: two sampled frames of one scene whose perceptual hashes (dHash) differ by at
     # most this many bits are the same image; the later one is dropped (its file deleted).
@@ -532,9 +552,92 @@ class CleanupConfig(_Section):
     # all:   also transcript, OCR, annotations, QA, validated and download metadata; only the
     #        per-video export and the log remain.
     frames_and_clips: bool = True  # with media/all: also delete frames/<id>/ (scene_NNN folders) and clips/<id>/
+    # V3 gate: a video whose rights manifest entry is ``approved`` keeps its source video and clips
+    # until its T2V / V2V assets were uploaded, read back and checksum-verified (`video-dataset v3
+    # publish`); `video-dataset v3 cleanup` then removes them. Other videos are metadata-only and are
+    # cleaned as before.
+    require_verified_upload: bool = True
     # The exported records keep their frame_path/clip_path values but the files are gone, so keep this
     # false if you need the media locally. Ignored while upload.include_media is on: the media is
     # bundled into the shard first and, with upload.after_upload=delete, removed after the upload.
+
+
+class V3LegacyConfig(_Section):
+    source: str = "local"  # local (an export dir or a folder of shard_* dirs) | huggingface
+    local_dir: str | None = None  # null -> the export dir (<data_dir>/final)
+    repo_id: str | None = None  # null -> upload.repo_id
+    revision: str | None = None  # null -> the repo head; the resolved commit is recorded
+
+
+class V3ReposConfig(_Section):
+    t2v: str = "raj270898/youtube-t2v-dataset"
+    v2v: str = "raj270898/youtube-v2v-dataset"
+    private: bool = True
+    token_env: str = "HF_TOKEN"
+
+
+class V3AcquisitionConfig(_Section):
+    reuse_local_source: bool = True  # use <data_dir>/downloads/<id>/video.mp4 when the main pipeline still has it
+    decode_check: str = "full"  # full (decode every frame) | sampled | none
+    duration_tolerance_seconds: float = 2.0  # reacquired vs legacy source duration; larger -> annotation_mismatch
+    max_attempts: int = 3  # FAILED_RETRYABLE jobs are retried up to this many times
+
+
+class V3ClipConfig(_Section):
+    statuses: list[str] = Field(default_factory=lambda: ["accepted"])  # legacy validation.status values that may become training clips
+    generation_targets: list[str] = Field(default_factory=lambda: ["single_shot"])  # legacy generation_target values allowed
+    require_boundary_check: bool = True  # legacy boundary_check must be passed
+    min_duration: float = 1.0
+    max_duration: float = 30.0
+    crf: int = 18
+    preset: str = "medium"
+    keep_audio: bool = False
+    duration_tolerance_seconds: float = 0.25  # extracted clip length vs the legacy span
+    frame_count_tolerance: int = 2
+    max_black_fraction: float = 0.5  # share of sampled frames that may be black
+    min_sharpness: float = 15.0  # variance of Laplacian (0 disables)
+    min_motion: float = 0.002  # mean frame-to-frame change (0..1) below this = frozen (0 disables)
+    near_duplicate_hamming: int = 4  # all sampled frame hashes within this distance of another clip = near-duplicate
+    single_shot_check: bool = True  # PySceneDetect on every extracted clip: a cut inside the clip -> rejected
+    prompt_check: bool = True  # spaCy on every prompt: no noun / no content words -> needs_human_review
+
+
+class V3V2VConfig(_Section):
+    enabled: bool = True
+    # deterministic FFmpeg edits only (see v3/v2v.py); generative edits (day-to-night, weather, object
+    # changes) are not produced by this pipeline
+    transforms: list[str] = Field(default_factory=lambda: ["cinematic_grade", "film_grain", "monochrome", "slow_motion"])
+    pairs_per_clip: int = 1  # transforms applied to each accepted clip (chosen by a stable hash of the clip id)
+    min_change: float = 0.01  # mean absolute pixel change (0..1) the target must show against the source
+    min_structure_correlation: float = 0.9  # luminance-layout correlation of aligned source / target frames (preserved content)
+
+
+class V3CacheConfig(_Section):
+    dir: str | None = None  # null -> <work_dir>/cache
+    max_gb: float = 5.0  # hard limit of the training loader's local media cache (LRU eviction)
+
+
+class V3TrainingConfig(_Section):
+    task_weights: dict[str, float] = Field(default_factory=lambda: {"text_to_video": 0.7, "video_to_video": 0.3})
+    batch_size: dict[str, int] = Field(default_factory=lambda: {"text_to_video": 1, "video_to_video": 1})
+    seed: int = 1234
+
+
+class V3Config(_Section):
+    """V3: visual, training-ready T2V / V2V datasets built on the existing annotations
+    (youtube_dataset_v3_pipeline.md). Nothing here touches the legacy annotation repository."""
+
+    work_dir: str | None = None  # null -> <data_dir>/v3
+    rights_manifest: str | None = None  # null -> <work_dir>/rights/rights_manifest.jsonl
+    frame_sampling_profile: str = "native_fps_v1"  # recorded with every asset; clips keep the source fps
+    legacy: V3LegacyConfig = Field(default_factory=V3LegacyConfig)
+    repos: V3ReposConfig = Field(default_factory=V3ReposConfig)
+    acquisition: V3AcquisitionConfig = Field(default_factory=V3AcquisitionConfig)
+    clips: V3ClipConfig = Field(default_factory=V3ClipConfig)
+    v2v: V3V2VConfig = Field(default_factory=V3V2VConfig)
+    cache: V3CacheConfig = Field(default_factory=V3CacheConfig)
+    training: V3TrainingConfig = Field(default_factory=V3TrainingConfig)
+    verify_readback_files: int = 3  # media files per repo downloaded again and re-hashed after an upload (0 = LFS hash only)
 
 
 class PipelineStagesConfig(_Section):
@@ -569,6 +672,7 @@ class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     project: ProjectConfig = Field(default_factory=ProjectConfig)
+    resolution: ResolutionConfig = Field(default_factory=ResolutionConfig)
     download: DownloadConfig = Field(default_factory=DownloadConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
@@ -589,7 +693,30 @@ class PipelineConfig(BaseModel):
     cleanup: CleanupConfig = Field(default_factory=CleanupConfig)
     upload: UploadConfig = Field(default_factory=UploadConfig)
     pipeline: PipelineStagesConfig = Field(default_factory=PipelineStagesConfig)
+    v3: V3Config = Field(default_factory=V3Config)
     presets: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _apply_resolution(self) -> PipelineConfig:
+        """One knob: every height that was left null follows ``resolution``."""
+        res = self.resolution
+        if int(res.target) <= 0:
+            raise ValueError("resolution.target must be a positive number of pixels (e.g. 720)")
+        cap = int(res.download_max or res.target)
+        if self.download.max_resolution is None:
+            self.download.max_resolution = cap
+        if self.preprocess.max_transcode_height is None:
+            self.preprocess.max_transcode_height = cap
+        if self.frame_sampling.clip_max_height is None:
+            self.frame_sampling.clip_max_height = int(res.target)
+        return self
+
+    @property
+    def v3_dir(self) -> Path:
+        if self.v3.work_dir:
+            p = Path(self.v3.work_dir)
+            return p if p.is_absolute() else (Path.cwd() / p)
+        return self.data_dir / "v3"
 
     # ----- derived paths -----
     @property
@@ -610,6 +737,43 @@ class PipelineConfig(BaseModel):
             p = Path(self.export.output_dir)
             return p if p.is_absolute() else (Path.cwd() / p)
         return self.data_dir / "final"
+
+
+def model_providers_in_use(config: PipelineConfig) -> list[str]:
+    """Settings that would load a learned model. Empty = the pipeline runs on FFmpeg, OpenCV,
+    PySceneDetect and spaCy only (spaCy's small English pipeline is the one statistical component)."""
+    found: list[str] = []
+    t, o, v = config.transcription, config.ocr, config.vision
+    if t.enabled and (t.provider or "none").lower() not in ("none", "mock"):
+        found.append(f"transcription.provider={t.provider} (speech-recognition model)")
+    if o.enabled and (o.provider or "none").lower() not in ("none", "mock"):
+        found.append(f"ocr.provider={o.provider} (text-recognition model)")
+    if (v.provider or "heuristic").lower() not in ("heuristic", "mock"):
+        found.append(f"vision.provider={v.provider}")
+    if v.enrichers:
+        found.append(f"vision.enrichers={list(v.enrichers)}")
+    if config.audio_events.enabled and (config.audio_events.provider or "none").lower() not in ("energy", "none"):
+        found.append(f"audio_events.provider={config.audio_events.provider}")
+    if (config.llm.provider or "none").lower() not in ("none", "mock"):
+        found.append(f"llm.provider={config.llm.provider}")
+    if (config.validation.verifier or "none").lower() not in ("none", "heuristic"):
+        found.append(f"validation.verifier={config.validation.verifier}")
+    if str(config.validation.clip_alignment).lower() in ("on", "true"):
+        found.append("validation.clip_alignment=on (CLIP)")
+    if config.qa.paraphrase:
+        found.append("qa.paraphrase=true (LLM)")
+    if (config.temporal.causal_inference or "none").lower() != "none":
+        found.append(f"temporal.causal_inference={config.temporal.causal_inference}")
+    return found
+
+
+def assert_no_models(config: PipelineConfig) -> None:
+    if not config.project.no_models:
+        return
+    allowed = tuple(f"{name}." for name in (config.project.no_models_except or []))
+    found = [f for f in model_providers_in_use(config) if not f.startswith(allowed)] if allowed else model_providers_in_use(config)
+    if found:
+        raise ValueError("project.no_models is true but these settings load a model: " + "; ".join(found) + ". Set them to none / heuristic / off, or set project.no_models: false.")
 
 
 # --------------------------------------------------------------------------------------
@@ -662,6 +826,7 @@ def _apply_env(data: dict[str, Any]) -> dict[str, Any]:
     env_map = {
         "VIDEO_DATASET_DATA_DIR": "project.data_dir",
         "VIDEO_DATASET_DEVICE": "project.device",
+        "VIDEO_PIPELINE_DEVICE": "project.device",
         "VIDEO_DATASET_LOG_LEVEL": "project.log_level",
         "VIDEO_DATASET_DB_PATH": "project.db_path",
         "YT_DLP_COOKIES": "download.cookies_file",

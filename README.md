@@ -1084,3 +1084,7 @@ Smoke-tested on real frames: `vision.preset=smolvlm2_256m` loads and generates t
 Without a generative vision backend the pipeline is fully functional but object/people/action
 annotations come only from speech, OCR, sound and measured signals; scene summaries are factual
 measurement descriptions. Plug in a VLM to get semantic descriptions - the rest of the pipeline is unchanged.
+
+## V3: visual T2V / V2V datasets
+
+Rights-gated reacquisition, real training clips, V2V pairs, verified publishing and a unified loader: see [docs/v3_pipeline.md](docs/v3_pipeline.md). The resolution of everything the pipeline keeps is one value, `resolution.target` in `config/default.yaml`.

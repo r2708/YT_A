@@ -65,6 +65,9 @@ def _config() -> PipelineConfig:
         if state.log_level:
             cfg.project.log_level = state.log_level
         setup_logging(cfg.project.log_level, cfg.data_dir / "logs")
+        from video_dataset.utils.device import configure as _configure_device
+
+        _configure_device(bool(cfg.project.require_accelerator))
         state.config = cfg
     return state.config
 
@@ -983,6 +986,11 @@ def clean(
 from video_dataset.cli_remediation import register as _register_remediation  # noqa: E402
 
 _register_remediation(app, _config, _apply_local_options)
+
+# v3 inventory / rights-init / rights-check / run / status / publish / cleanup / loader-check
+from video_dataset.v3.cli import register as _register_v3  # noqa: E402
+
+_register_v3(app, _config, _apply_local_options)
 
 
 if __name__ == "__main__":  # pragma: no cover

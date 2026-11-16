@@ -22,8 +22,10 @@ def test_defaults_enable_node_and_ejs_fetch(tmp_path: Path):
     assert list(opts["js_runtimes"]) == ["node", "deno", "bun"]
     assert opts["js_runtimes"]["node"] == {}
     assert opts["remote_components"] == {"ejs:github"}
-    # the format selector must still prefer <=1080p mp4 (no android-client downgrade to 360p)
-    assert "bestvideo[height<=1080][ext=mp4]" in opts["format"]
+    # the format selector must still prefer mp4 at the configured cap (no android-client downgrade to
+    # 360p); the cap follows resolution.target (720) unless download.max_resolution is set
+    assert "bestvideo[height<=720][ext=mp4]" in opts["format"]
+    assert "bestvideo[height<=1080][ext=mp4]" in _opts(tmp_path, max_resolution=1080)["format"]
     assert "player_client" not in str(opts.get("extractor_args", {}))
 
 

@@ -129,6 +129,10 @@ class PipelineRunner:
         holds the lock. recover=False (status / export / clean): read the checkpoint table as it is,
         never touching a live run's bookkeeping."""
         self.config = config
+        if recover:  # commands that execute stages: project.no_models must hold before anything runs
+            from video_dataset.config import assert_no_models
+
+            assert_no_models(config)
         self.paths = DataPaths(config.data_dir)
         self.paths.ensure_all()
         self.db = db or StateDB(config.db_path)
@@ -405,6 +409,16 @@ class PipelineRunner:
 
         level = (self.config.cleanup.after_export or "none").lower()
         if level == "none":
+            return
+        try:  # V3 gate: an approved source keeps its media until the T2V / V2V upload is verified
+            from video_dataset.v3.cleanup import cleanup_block_reason
+
+            blocked = cleanup_block_reason(self.config, video_id)
+        except Exception as exc:  # fail closed: when the gate cannot be evaluated nothing is deleted
+            blocked = f"cleanup gate could not be evaluated ({exc})"
+        if blocked:
+            self.db.log(video_id, "CLEANUP", "INFO", f"skipped: {blocked}")
+            log.info(stage_line("CLEANUP", video_id, f"skipped: {blocked}", ok=True))
             return
         media = bool(self.config.cleanup.frames_and_clips)
         if media and self.config.upload.include_media:

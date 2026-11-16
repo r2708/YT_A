@@ -116,6 +116,16 @@ def model_identifiers(config: Any) -> dict[str, Any]:
     }
 
 
+def _runtime(config: Any) -> dict[str, Any]:
+    """Selected compute device + framework (utils/device.py); never raises."""
+    try:
+        from video_dataset.utils.device import runtime_info
+
+        return runtime_info(config.project.device)
+    except Exception as exc:  # pragma: no cover
+        return {"selected_device": None, "fallback_reason": f"device detection failed: {exc}"}
+
+
 def environment_manifest(config: Any) -> dict[str, Any]:
     """The full reproducibility block (cached parts are computed once per process)."""
     from video_dataset.validation.policy import POLICY_VERSION
@@ -126,6 +136,7 @@ def environment_manifest(config: Any) -> dict[str, Any]:
         "code": code_version(),
         "python": sys.version.split()[0],
         "platform": {"system": platform.system(), "release": platform.release(), "machine": platform.machine()},
+        "runtime": _runtime(config),
         "tools": tool_versions(config.project.ffmpeg_path, config.project.ffprobe_path),
         "packages": package_versions(),
         "models": model_identifiers(config),

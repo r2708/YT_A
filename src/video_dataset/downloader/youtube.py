@@ -311,7 +311,7 @@ class YouTubeDownloader:
 
     # -------------------------------------------------------------- options
     def build_options(self, dest_dir: Path) -> dict[str, Any]:
-        h = int(self.config.max_resolution)
+        h = int(self.config.max_resolution or 720)
         fmt = (
             f"bestvideo[height<={h}][ext=mp4]+bestaudio[ext=m4a]/"
             f"bestvideo[height<={h}]+bestaudio/"
@@ -464,7 +464,7 @@ class YouTubeDownloader:
             opts["skip_download"] = True  # still refresh metadata cheaply
             log.info("%s already downloaded (%s, %s); refreshing metadata only", video_id, existing.name, fmt_bytes(existing.stat().st_size))
         else:
-            log.info("fetching metadata and best <=%dp streams for %s", int(self.config.max_resolution), url)
+            log.info("fetching metadata and best <=%dp streams for %s", int(self.config.max_resolution or 720), url)
         t_fetch = time.time()
 
         attempts = {"n": 0}

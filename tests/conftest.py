@@ -30,6 +30,7 @@ def test_config(tmp_path: Path):
     overrides = {
         "project.data_dir": str(tmp_path / "data"),
         "project.log_level": "WARNING",
+        "project.no_models": "false",  # the functional tests exercise the optional OCR engine too
         "transcription.provider": "mock",
         "audio_events.provider": "energy",
         "vision.provider": "heuristic",

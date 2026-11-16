@@ -68,3 +68,6 @@ data/factory/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# V3 working directory: rights manifest + permission evidence, job state, staged repos, media cache
+data/v3/

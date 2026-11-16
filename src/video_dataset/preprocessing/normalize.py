@@ -60,7 +60,7 @@ def ensure_canonical_video(
         dest.unlink(missing_ok=True)
 
     log.info("transcoding %s -> %s (container=%s codec=%s)", source.name, dest.name, info.container, info.video_codec)
-    scale = f"scale=-2:'min(ih,{int(config.max_transcode_height)})'"
+    scale = f"scale=-2:'min(ih,{int(config.max_transcode_height or 720)})'"
     args = [
         "-i", str(source),
         "-map", "0:v:0",

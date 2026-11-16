@@ -5,14 +5,35 @@ project:
   data_dir: data
   db_path: null            # default: <data_dir>/state.db
   log_level: INFO
-  device: cuda             # auto | cuda | mps | cpu - Force CUDA for GPU
+  device: auto             # auto | cuda | mps | cpu. auto: Windows/Linux -> NVIDIA CUDA else CPU; macOS -> Apple MPS else CPU.
+                           # Env VIDEO_PIPELINE_DEVICE overrides this for one run. An unavailable device falls back to CPU
+                           # with a warning ...
+  no_models: true          # true = no AI model except the stages listed in no_models_except: the rest of the work is
+                           # done by FFmpeg, OpenCV, PySceneDetect and spaCy. A run refuses to start if any other
+                           # stage is switched to a model (YOLO, CLIP, VLM / LLM, audio classifier).
+  no_models_except: [transcription, ocr]   # Whisper speech-to-text and OCR stay on; remove one here to forbid it too
+  require_accelerator: false  # ... or fails instead when true (env REQUIRE_ACCELERATOR=true)
   seed: 1234
   ffmpeg_path: null        # null -> search PATH, then the imageio-ffmpeg bundled binary
   ffprobe_path: null
 
+# ---------------------------------------------------------------------------------------------
+# RESOLUTION - change it here. `target` is the short edge in pixels: 720 = 720p, 1080 = 1080p,
+# 480 = 480p ... The download cap, the canonical transcode, re-encoded clips and the V3 T2V/V2V
+# training clips all follow this one value. A source smaller than the target is never upscaled:
+# it is kept at its native size and labelled with its own bucket.
+#   one-off:  video-dataset run urls.txt --set resolution.target=1080
+# ---------------------------------------------------------------------------------------------
+resolution:
+  target: 720              # <- THE knob
+  download_max: null       # null = same as target. Set e.g. 1080 to download 1080p and downscale clips to `target`
+  native_min: 480          # source below target but >= this: kept native, bucket native_480_576 (primary training)
+  experimental_min: 360    # >= this: bucket lowres_360 (not in primary training); below: excluded_lowres
+  allow_upscale: false     # true: upscale smaller sources to target, always labelled upscaled=true
+
 download:
   provider: yt_dlp
-  max_resolution: 1080
+  max_resolution: null     # null -> follows resolution (above). A number here overrides it for the download only
   format: mp4
   cookies_file: null       # only for videos you are authorized to access (exported Netscape cookies.txt)
   cookies_from_browser: brave # e.g. brave, chrome, "chrome:Profile 1", firefox, edge - read cookies straight from the
@@ -45,7 +66,7 @@ preprocess:
   audio_channels: 1
   transcode_if_needed: true
   decodable_codecs: [h264, hevc, vp9, av1, mpeg4, vp8]
-  max_transcode_height: 1080
+  max_transcode_height: null   # null -> follows resolution
 
 scene_detection:
   detector: content        # content | adaptive | threshold
@@ -78,7 +99,7 @@ frame_sampling:
   clip_max_duration: 30.0
   clip_codec: auto         # auto (stream-copy, re-encode clips that miss the boundary) | libx264 (always exact) | copy (keyframe aligned only)
   clip_tolerance_seconds: 0.25  # a clip whose real length differs from the scene by more than this is re-cut (auto) or flagged (copy)
-  clip_max_height: 1080   # re-encoded clips are downscaled to this height
+  clip_max_height: null   # re-encoded clips are downscaled to this height; null -> resolution.target
   workers: null            # threads for frame extraction + clip cutting; null -> pipeline.stage_workers
   drop_duplicate_frames: true   # sampled frames whose perceptual hash matches an earlier frame of the scene are dropped
   duplicate_frame_hamming: 4    # dHash bits that may differ for two frames to count as the same image
@@ -147,7 +168,7 @@ vision:
   use_video_input: false
   enrichers: []            # optional grounded enrichers, e.g. [clip]
   clip_model: openai/clip-vit-base-patch32
-  aesthetic: true          # LAION aesthetic predictor (linear head on the CLIP embedding, ~1..10) wherever CLIP runs
+  aesthetic: false         # LAION aesthetic predictor (linear head on the CLIP embedding, ~1..10) wherever CLIP runs
   aesthetic_weights: null  # path/URL of the .pth; null -> the head matching clip_model, downloaded once
   aesthetic_cache_dir: null  # null -> ~/.cache/video_dataset/aesthetic
   max_new_tokens: 700
@@ -214,7 +235,7 @@ qa:
   allow_unscored_evidence: true
   paraphrase: false        # LLM paraphrasing of template questions (requires llm.provider)
   include_speech_in_answers: true
-  generator: template      # template | spacy | both - template: temporal templates; spacy: dependency-parsed questions per event; both: merged
+  generator: both          # template | spacy | both - template: temporal templates; spacy: dependency-parsed questions per event; both: merged
   spacy_model: en_core_web_sm  # python -m spacy download en_core_web_sm
   spacy_max_per_event: 3   # spaCy questions kept per event before the per-video target applies
   ocr_filter: true         # skip on-screen text events whose OCR text does not look like words (garbled watermark reads)
@@ -233,7 +254,7 @@ validation:
   workers: null            # threads for verifier calls; null -> pipeline.stage_workers
   consistency_checks: true # contradictory annotations (static camera + tracked subject, dark label on a bright frame, ...)
   reject_contradictions: true  # true: such shots are rejected; false: sent to review
-  clip_alignment: auto     # auto (when CLIP is already loaded) | on | off - caption vs frames retrieval check
+  clip_alignment: off      # auto (when CLIP is already loaded) | on | off - caption vs frames retrieval check
   clip_alignment_text: prompt  # prompt (natural-language generation prompt of the shot) | summary (measurement summary with hex colours)
   clip_alignment_min_rank_fraction: 0.75 # the shot's own caption must rank in the top three quarters of the video's captions ...
   clip_alignment_min_margin: 0.05        # ... unless the best caption beats it by less than this cosine margin (noise)
@@ -373,3 +394,61 @@ cleanup:
   frames_and_clips: true   # with media/all: also delete frames/<id>/ (the scene_NNN folders) and clips/<id>/
                            # once the video is done. Set false to keep the media the records point at.
                            # Ignored while upload.include_media is on (the shard needs the files first).
+  require_verified_upload: true  # V3 gate: a video that is `approved` in the rights manifest keeps its source video
+                           # and clips until `video-dataset v3 publish` uploaded, read back and checksum-verified its
+                           # T2V/V2V assets; `video-dataset v3 cleanup` deletes them afterwards. Videos without an
+                           # approved entry are metadata-only and are cleaned exactly as before.
+
+# ---------------------------------------------------------------------------------------------
+# V3 - visual T2V / V2V training datasets (youtube_dataset_v3_pipeline.md). `video-dataset v3 --help`
+# ---------------------------------------------------------------------------------------------
+v3:
+  work_dir: null           # null -> <data_dir>/v3 (state db, jobs, registry, staging, cache)
+  rights_manifest: null    # null -> <work_dir>/rights/rights_manifest.jsonl (create with `v3 rights-init`)
+  frame_sampling_profile: native_fps_v1   # clips keep the source fps; recorded with every asset
+  verify_readback_files: 3 # media files per repo downloaded again + re-hashed after upload (0 = Hub LFS hash only)
+  legacy:                  # the existing annotation dataset - read only, never rewritten
+    source: local          # local | huggingface
+    local_dir: null        # null -> data/final; may also be a folder holding shard_* directories
+    repo_id: null          # null -> upload.repo_id
+    revision: null         # null -> current head (the resolved commit is written to legacy_dataset_revision.txt)
+  repos:
+    t2v: raj270898/youtube-t2v-dataset
+    v2v: raj270898/youtube-v2v-dataset
+    private: true          # media of a source with redistribution_allowed=false is never pushed to a public repo
+    token_env: HF_TOKEN
+  acquisition:
+    reuse_local_source: true        # use data/downloads/<id>/video.mp4 when it is still on disk (no re-download)
+    decode_check: full              # full | sampled | none
+    duration_tolerance_seconds: 2.0 # reacquired vs legacy duration; beyond this the annotations do not match
+    max_attempts: 3
+  clips:
+    statuses: [accepted]            # legacy validation.status values that may become training clips
+    generation_targets: [single_shot]
+    require_boundary_check: true
+    min_duration: 1.0
+    max_duration: 30.0
+    crf: 18
+    preset: medium
+    keep_audio: false
+    duration_tolerance_seconds: 0.25
+    frame_count_tolerance: 2
+    max_black_fraction: 0.5
+    min_sharpness: 15.0
+    min_motion: 0.002
+    near_duplicate_hamming: 4
+    single_shot_check: true         # PySceneDetect on every extracted clip: a cut inside it -> rejected
+    prompt_check: true              # spaCy on every prompt: no noun / content words -> needs_human_review
+  v2v:
+    enabled: true
+    transforms: [cinematic_grade, film_grain, monochrome, slow_motion]   # deterministic FFmpeg edits only
+    pairs_per_clip: 1
+    min_change: 0.01               # mean pixel change (0..1) a non-temporal edit must show, else the target is a duplicate
+    min_structure_correlation: 0.9 # layout correlation of aligned source/target frames, else the content was not preserved
+  cache:
+    dir: null              # null -> <work_dir>/cache
+    max_gb: 5.0            # hard limit of the training loader's media cache (LRU)
+  training:
+    task_weights: {text_to_video: 0.7, video_to_video: 0.3}
+    batch_size: {text_to_video: 1, video_to_video: 1}
+    seed: 1234
